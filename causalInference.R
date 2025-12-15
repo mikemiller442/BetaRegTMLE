@@ -1,0 +1,724 @@
+
+
+
+
+
+
+
+
+
+### Load libraries
+library(betareg)
+
+
+
+# Calculates a robust TMLE estimator for the ATE for a single outcome
+robustcompATE <- function(outcome_mod,ps_mod,covariates,
+                          exposure_name,outcome_name,
+                          trunc_level,scale_factor = 1.0) {
+  
+  ### calculate clever covariates for TMLE
+  ps_pred <- predict(ps_mod,newdata = covariates,type = "response")
+  ps_trunc <- pmax(pmin(ps_pred,1.0 - trunc_level),trunc_level)
+  exposure <- covariates[[exposure_name]]
+  trunc_weights_0 <- ifelse(exposure == 0,-1.0 / (1.0 - ps_trunc),0)
+  trunc_weights_1 <- ifelse(exposure == 1,1.0 / ps_trunc,0)
+  H_0_Y <- -1.0 * trunc_weights_0
+  H_1_Y <- trunc_weights_1
+  H_A_Y <- ifelse(exposure == 1,H_1_Y,H_0_Y)
+  
+  ### estimate fluctuation parameter
+  pred_y <- predict(outcome_mod,newdata = covariates,type = "response")
+  outcome_values <- covariates[[outcome_name]]
+  data_tmle <- data.frame(Y = outcome_values,
+                          pred_vals = pred_y,
+                          H_A_Y = H_A_Y)
+  eps <- coef(glm(Y ~ -1 + offset(qlogis(pred_vals)) + H_A_Y,
+                  data = data_tmle,family = "binomial"))
+  
+  ### update predictions using fluctuation parameter
+  pred_y_A <- predict(outcome_mod,covariates,type = "response")
+  covariates_0 <- covariates
+  covariates_0[[exposure_name]] <- 0
+  covariates_1 <- covariates
+  covariates_1[[exposure_name]] <- 1
+  pred_y_0 <- predict(outcome_mod,covariates_0,type = "response")
+  pred_y_1 <- predict(outcome_mod,covariates_1,type = "response")
+  pred_star_y_A <- plogis(qlogis(pred_y_A) + eps * H_A_Y)
+  pred_star_y_0 <- plogis(qlogis(pred_y_0) + eps * H_0_Y)
+  pred_star_y_1 <- plogis(qlogis(pred_y_1) + eps * H_1_Y)
+  
+  ### calculate ATE using targeted estimates
+  ate_star <- pred_star_y_1 - pred_star_y_0
+  ate_star_scaled <- ate_star * scale_factor
+  
+  ### calculate efficient influence function
+  D_Y <- H_A_Y * (outcome_values - pred_star_y_A)
+  D_W <- ate_star - mean(ate_star)
+  EIF <- D_Y + D_W
+  
+  ### calculate standard errors and confidence intervals
+  n <- length(EIF)
+  var_ate <- var(EIF) / n
+  se_ate_scaled <- sqrt(var_ate) * scale_factor
+  ate_mean <- mean(ate_star_scaled)
+  ci_lower <- ate_mean - qnorm(0.975) * se_ate_scaled
+  ci_upper <- ate_mean + qnorm(0.975) * se_ate_scaled
+  
+  ### return results
+  return(list(ATE = ate_mean,
+              ITE = ate_star_scaled,
+              IF = EIF,
+              SE = se_ate_scaled,
+              CI = c(lower = ci_lower,upper = ci_upper)))
+}
+
+
+# Calculates a robust TMLE estimator for the ATT
+robustcompATT <- function(outcome_mod,ps_mod,covariates,
+                          exposure_name,outcome_name,
+                          scale_factor = 1.0,trunc_level = 0.05,
+                          max_iter = 100,tol = 1e-15) {
+  
+  ### calculate propensity scores and outcome predictions
+  A <- covariates[[exposure_name]]
+  P_A1 <- mean(A)
+  pred_ps_raw <- predict(ps_mod,newdata = covariates,type = "response")
+  pred_ps <- pmax(pmin(pred_ps_raw,1.0 - trunc_level),trunc_level)
+  covariates_0 <- covariates
+  covariates_0[[exposure_name]] <- 0
+  covariates_1 <- covariates
+  covariates_1[[exposure_name]] <- 1
+  pred_y_A <- predict(outcome_mod,newdata = covariates,type = "response")
+  pred_y_0 <- predict(outcome_mod,newdata = covariates_0,type = "response")
+  pred_y_1 <- predict(outcome_mod,newdata = covariates_1,type = "response")
+  outcome_values <- covariates[[outcome_name]]
+  
+  ### iterative TMLE
+  for (iter in 1:max_iter) {
+    
+    # save previous estimates for convergence check
+    psi_att_old <- mean((pred_ps / P_A1) * (pred_y_1 - pred_y_0))
+    
+    ### update outcome predictions
+    H_0_Y <- -1.0 * pred_ps / (P_A1 * (1.0 - pred_ps))
+    H_1_Y <- 1.0 / P_A1
+    H_A_Y <- ifelse(A == 1,H_1_Y,H_0_Y)
+    eps_y <- coef(glm(outcome_values ~ -1 + offset(qlogis(pred_y_A)) + H_A_Y,
+                      family = "binomial"))
+    pred_y_A <- plogis(qlogis(pred_y_A) + eps_y * H_A_Y)
+    pred_y_0 <- plogis(qlogis(pred_y_0) + eps_y * H_0_Y)
+    pred_y_1 <- plogis(qlogis(pred_y_1) + eps_y * H_1_Y)
+    
+    ### update propensity score
+    psi_att <- mean((pred_ps / P_A1) * (pred_y_1 - pred_y_0))
+    H_A_PS <- (1.0 / P_A1) * (pred_y_1 - pred_y_0 - psi_att)
+    eps_ps <- coef(glm(A ~ -1 + offset(qlogis(pred_ps)) + H_A_PS,
+                       family = "binomial"))
+    pred_ps <- plogis(qlogis(pred_ps) + eps_ps * H_A_PS)
+    
+    # check convergence
+    psi_att_new <- mean((pred_ps / P_A1) * (pred_y_1 - pred_y_0))
+    if (abs(psi_att_new - psi_att_old) < tol) {
+      break
+    }
+  }
+  
+  # calculate efficient influence function for ATT
+  psi_att <- mean((pred_ps / P_A1) * (pred_y_1 - pred_y_0))
+  H_0_Y <- -1.0 * pred_ps / (P_A1 * (1.0 - pred_ps))
+  H_1_Y <- 1.0 / P_A1
+  H_A_Y <- ifelse(A == 1,H_1_Y,H_0_Y)
+  D_Y <- H_A_Y * (outcome_values - pred_y_A)
+  D_W <- (A / P_A1) * (pred_y_1 - pred_y_0 - psi_att)
+  EIF <- D_Y + D_W
+  mean_EIF <- mean(EIF)
+  psi_att_scaled <- psi_att * scale_factor
+  EIF_scaled <- EIF * scale_factor
+  
+  # calculate 95% confidence interval
+  se <- sqrt(var(EIF_scaled) / length(EIF_scaled))
+  ci_lower <- psi_att_scaled - qnorm(0.975) * se
+  ci_upper <- psi_att_scaled + qnorm(0.975) * se
+  
+  ### return results
+  return(list(ATT = psi_att_scaled,
+              IF = EIF_scaled,
+              SE = se,
+              CI = c(lower = ci_lower,upper = ci_upper)))
+}
+
+
+# Calculates a robust TMLE estimator for the ATE with missing outcomes
+robustcompATE_MAR <- function(outcome_mod,ps_mod,missing_mod,
+                              covariates_full,exposure_name,
+                              outcome_observed,trunc_level,
+                              outcome_values,outcome_name,
+                              scale_factor = 1.0) {
+  
+  ### calculate clever covariates for TMLE
+  exposure <- covariates_full[[exposure_name]]
+  ps_pred <- predict(ps_mod,type = "response")
+  ps_trunc <- pmax(pmin(ps_pred,1.0 - trunc_level),trunc_level)
+  trunc_weights_exposure_0 <- ifelse(exposure == 0,-1.0 / (1.0 - ps_trunc),0)
+  trunc_weights_exposure_1 <- ifelse(exposure == 1,1.0 / ps_trunc,0)
+  prob_obs <- predict(missing_mod,type = "response")
+  covariates_0 <- covariates_full
+  covariates_0[[exposure_name]] <- 0
+  covariates_1 <- covariates_full
+  covariates_1[[exposure_name]] <- 1
+  prob_obs_0 <- predict(missing_mod,
+                        newdata = covariates_0,
+                        type = "response")
+  prob_obs_0_trunc <- pmax(pmin(prob_obs_0,1.0 - trunc_level),trunc_level)
+  prob_obs_1 <- predict(missing_mod,
+                        newdata = covariates_1,
+                        type = "response")
+  prob_obs_1_trunc <- pmax(pmin(prob_obs_1,1.0 - trunc_level),trunc_level)
+  trunc_weights_missing_0 <- ifelse(outcome_observed == 1,1.0 / prob_obs_0_trunc,0)
+  trunc_weights_missing_1 <- ifelse(outcome_observed == 1,1.0 / prob_obs_1_trunc,0)
+  n_total <- nrow(covariates_full)
+  combined_weights_0 <- trunc_weights_exposure_0 * trunc_weights_missing_0
+  combined_weights_1 <- trunc_weights_exposure_1 * trunc_weights_missing_1
+  H_0_Y <- combined_weights_0
+  H_1_Y <- combined_weights_1
+  H_A_Y <- ifelse(exposure == 1,H_1_Y,H_0_Y)
+  H_A_Y_observed <- H_A_Y * outcome_observed
+  
+  ### estimate fluctuation parameter
+  pred_y_full <- predict(outcome_mod,newdata = covariates_full,type = "response")
+  obs_indices <- which(outcome_observed == 1)
+  data_tmle <- data.frame(Y = outcome_values[obs_indices],
+                          pred_vals = pred_y_full[obs_indices],
+                          H_A_Y = H_A_Y[obs_indices])
+  eps <- coef(glm(Y ~ -1 + offset(qlogis(pred_vals)) + H_A_Y,
+                  data = data_tmle,family = "binomial"))
+  
+  ### update predictions using fluctuation parameter
+  pred_y_A <- pred_y_full
+  pred_y_0 <- predict(outcome_mod,covariates_0,type = "response")
+  pred_y_1 <- predict(outcome_mod,covariates_1,type = "response")
+  pred_star_y_A <- plogis(qlogis(pred_y_A) + eps * H_A_Y)
+  pred_star_y_0 <- plogis(qlogis(pred_y_0) + eps * H_0_Y)
+  pred_star_y_1 <- plogis(qlogis(pred_y_1) + eps * H_1_Y)
+  
+  ### calculate ATE using targeted estimates for the full dataset
+  ate_star <- pred_star_y_1 - pred_star_y_0
+  ate_star_scaled <- ate_star * scale_factor
+  
+  ### calculate efficient influence function
+  D_Y <- outcome_observed * H_A_Y * (outcome_values - pred_star_y_A)
+  D_Y[is.na(D_Y)] <- 0
+  D_W <- ate_star - mean(ate_star)
+  EIF <- D_Y + D_W
+  
+  ### calculate 95% confidence intervals
+  var_ate <- var(EIF) / n_total
+  se_ate_scaled <- sqrt(var_ate) * scale_factor
+  ate_mean <- mean(ate_star_scaled)
+  ci_lower <- ate_mean - qnorm(0.975) * se_ate_scaled
+  ci_upper <- ate_mean + qnorm(0.975) * se_ate_scaled
+  
+  ### return results
+  return(list(ATE = ate_mean,
+              ITE = ate_star_scaled,
+              IF = EIF,
+              SE = se_ate_scaled,
+              CI = c(lower = ci_lower,upper = ci_upper)))
+}
+
+
+# Calculates a robust TMLE estimator for the ATT with missing outcomes
+robustcompATT_MAR <- function(outcome_mod,ps_mod,missing_mod,
+                              covariates_full,exposure_name,
+                              outcome_observed,outcome_values,
+                              outcome_name,trunc_level = 0.05,
+                              scale_factor = 1.0,
+                              max_iter = 100,tol = 1e-15) {
+  
+  ### calculate propensity scores and outcome predictions
+  A <- covariates_full[[exposure_name]]
+  prob_obs <- predict(missing_mod,type = "response")
+  covariates_0 <- covariates_full
+  covariates_0[[exposure_name]] <- 0
+  covariates_1 <- covariates_full
+  covariates_1[[exposure_name]] <- 1
+  prob_obs_0 <- predict(missing_mod,newdata = covariates_0,type = "response")
+  prob_obs_0_trunc <- pmax(pmin(prob_obs_0,1.0 - trunc_level),trunc_level)
+  prob_obs_1 <- predict(missing_mod,newdata = covariates_1,type = "response")
+  prob_obs_1_trunc <- pmax(pmin(prob_obs_1,1.0 - trunc_level),trunc_level)
+  trunc_weights_missing_0 <- ifelse(outcome_observed == 1,1.0 / prob_obs_0_trunc,0)
+  trunc_weights_missing_1 <- ifelse(outcome_observed == 1,1.0 / prob_obs_1_trunc,0)
+  n_total <- nrow(covariates_full)
+  P_A1 <- mean(A)
+  pred_ps_raw <- predict(ps_mod,newdata = covariates_full,type = "response")
+  pred_ps <- pmax(pmin(pred_ps_raw,1.0 - trunc_level),trunc_level)
+  pred_y_A <- predict(outcome_mod,newdata = covariates_full,type = "response")
+  pred_y_0 <- predict(outcome_mod,newdata = covariates_0,type = "response")
+  pred_y_1 <- predict(outcome_mod,newdata = covariates_1,type = "response")
+  
+  # iterative TMLE
+  for (iter in 1:max_iter) {
+    
+    # save previous estimate for convergence check
+    psi_att_old <- mean((pred_ps / P_A1) * (pred_y_1 - pred_y_0))
+    
+    ### update outcome predictions
+    H_0_Y <- -1.0 * (pred_ps * trunc_weights_missing_0) / (P_A1 * (1.0 - pred_ps))
+    H_1_Y <- trunc_weights_missing_1 / P_A1
+    H_A_Y <- ifelse(A == 1,H_1_Y,H_0_Y)
+    H_A_Y_observed <- H_A_Y * outcome_observed
+    obs_indices <- which(outcome_observed == 1)
+    data_tmle_y <- data.frame(Y = outcome_values[obs_indices],
+                              pred_vals = pred_y_A[obs_indices],
+                              H_A_Y = H_A_Y[obs_indices])
+    eps_y <- coef(glm(Y ~ -1 + offset(qlogis(pred_vals)) + H_A_Y,
+                      data = data_tmle_y,
+                      family = "binomial"))
+    pred_y_A <- plogis(qlogis(pred_y_A) + eps_y * H_A_Y)
+    pred_y_0 <- plogis(qlogis(pred_y_0) + eps_y * H_0_Y)
+    pred_y_1 <- plogis(qlogis(pred_y_1) + eps_y * H_1_Y)
+    
+    ### update propensity score
+    psi_att <- mean((pred_ps / P_A1) * (pred_y_1 - pred_y_0))
+    H_A_PS <- (1.0 / P_A1) * (pred_y_1 - pred_y_0 - psi_att)
+    H_A_PS_observed <- H_A_PS * outcome_observed
+    data_tmle_ps <- data.frame(A = A[obs_indices],
+                               ps_vals = pred_ps[obs_indices],
+                               H_A_PS = H_A_PS[obs_indices])
+    eps_ps <- coef(glm(A ~ -1 + offset(qlogis(ps_vals)) + H_A_PS,
+                       data = data_tmle_ps,
+                       family = "binomial"))
+    pred_ps <- plogis(qlogis(pred_ps) + eps_ps * H_A_PS)
+    
+    # check convergence
+    psi_att_new <- mean((pred_ps / P_A1) * (pred_y_1 - pred_y_0))
+    if (abs(psi_att_new - psi_att_old) < tol) {
+      break
+    }
+  }
+  
+  # calculate efficient influence function for ATT
+  psi_att <- mean((pred_ps / P_A1) * (pred_y_1 - pred_y_0))
+  H_0_Y <- -1.0 * (pred_ps * trunc_weights_missing_0) / (P_A1 * (1.0 - pred_ps))
+  H_1_Y <- trunc_weights_missing_1 / P_A1
+  H_A_Y <- ifelse(A == 1,H_1_Y,H_0_Y)
+  D_Y <- outcome_observed * H_A_Y * (outcome_values - pred_y_A)
+  D_Y[is.na(D_Y)] <- 0
+  D_W <- (A / P_A1) * (pred_y_1 - pred_y_0 - psi_att)
+  EIF <- D_Y + D_W
+  mean_EIF <- mean(EIF)
+  psi_att_scaled <- psi_att * scale_factor
+  EIF_scaled <- EIF * scale_factor
+  
+  # calculate 95% confidence interval
+  var_att <- var(EIF) / n_total
+  se_att_scaled <- sqrt(var_att) * scale_factor
+  ci_lower <- psi_att_scaled - qnorm(0.975) * se_att_scaled
+  ci_upper <- psi_att_scaled + qnorm(0.975) * se_att_scaled
+  
+  # return results
+  return(list(ATT = psi_att_scaled,
+              IF = EIF_scaled,
+              SE = se_att_scaled,
+              CI = c(lower = ci_lower,upper = ci_upper)))
+}
+
+
+### Generate simulated data
+generate_stroke_data <- function(n = 1000,
+                                 exposure_name = "rehabIRF",
+                                 missing_outcome = FALSE,
+                                 prob_observed_baseline = 0.8,
+                                 fixed_covariates = NULL) {
+  
+  ### generate or use fixed baseline covariates
+  if (is.null(fixed_covariates)) {
+    # age
+    age <- rnorm(n,mean = 70,sd = 12)
+    age_scaled <- (age - mean(age)) / sd(age)
+    
+    # post-discharge disability
+    # higher values = more disability
+    post_discharge_disability <- rbeta(n,shape1 = 2,shape2 = 3) * 100
+    post_discharge_disability_scaled <- (post_discharge_disability - mean(post_discharge_disability)) / 
+      sd(post_discharge_disability)
+    
+    # stroke severity
+    stroke_severity <- rpois(n,lambda = 8)
+    stroke_severity <- pmin(stroke_severity,42)
+    stroke_severity_scaled <- (stroke_severity - mean(stroke_severity)) / 
+      sd(stroke_severity)
+    
+    # comorbidity score
+    comorbidity <- rpois(n,lambda = 2)
+    comorbidity <- pmin(comorbidity,10)
+    comorbidity_scaled <- (comorbidity - mean(comorbidity)) / sd(comorbidity)
+  } else {
+    age <- fixed_covariates$age
+    age_scaled <- fixed_covariates$age_scaled
+    post_discharge_disability <- fixed_covariates$post_discharge_disability
+    post_discharge_disability_scaled <- fixed_covariates$post_discharge_disability_scaled
+    stroke_severity <- fixed_covariates$stroke_severity
+    stroke_severity_scaled <- fixed_covariates$stroke_severity_scaled
+    comorbidity <- fixed_covariates$comorbidity
+    comorbidity_scaled <- fixed_covariates$comorbidity_scaled
+  }
+  
+  ### generate treatment assignment
+  # propensity score depends on covariates
+  # higher post_discharge_disability -> higher treatment probability
+  logit_ps <- -0.8 +
+    0.15 * age_scaled + 
+    0.8 * post_discharge_disability_scaled +
+    0.15 * stroke_severity_scaled + 
+    -0.1 * comorbidity_scaled 
+  
+  ps <- plogis(logit_ps)
+  exposure <- rbinom(n,size = 1,prob = ps)
+  
+  ### generate outcomes using beta regression structure
+  # true data generating mechanism for mean
+  # higher post_discharge_disability -> higher follow-up disability
+  # treatment (exposure) -> lower follow-up disability
+  mu_adl_logit <- -1.0 + 
+    1.0 * post_discharge_disability_scaled +
+    -0.5 * exposure +
+    0.4 * stroke_severity_scaled + 
+    0.2 * age_scaled + 
+    0.1 * comorbidity_scaled +
+    -0.15 * exposure * post_discharge_disability_scaled
+  
+  mu_adl <- plogis(mu_adl_logit)
+  
+  # beta distribution parameters
+  phi_adl <- 15
+  shape1_adl <- mu_adl * phi_adl
+  shape2_adl <- (1.0 - mu_adl) * phi_adl
+  
+  # generate outcome on 0-1 scale
+  OUT3_ADL_IADL_01 <- rbeta(n,shape1 = shape1_adl,shape2 = shape2_adl)
+  
+  # re-scale to 0-3 range
+  OUT3_ADL_IADL <- OUT3_ADL_IADL_01 * 3.0
+  
+  ### generate missing outcome indicators if requested
+  if (missing_outcome) {
+    logit_observed_adl <- qlogis(prob_observed_baseline) + 
+      0.3 * age_scaled + 
+      0.2 * post_discharge_disability_scaled + 
+      0.3 * stroke_severity_scaled + 
+      0.15 * comorbidity_scaled +
+      0.4 * exposure
+    
+    prob_observed_adl <- plogis(logit_observed_adl)
+    observed_adl <- rbinom(n,size = 1,prob = prob_observed_adl)
+    
+    # set missing outcomes to NA
+    OUT3_ADL_IADL_with_missing <- ifelse(observed_adl == 1,OUT3_ADL_IADL,NA)
+  } else {
+    # no missingness
+    observed_adl <- rep(1,n)
+    OUT3_ADL_IADL_with_missing <- OUT3_ADL_IADL
+    prob_observed_adl <- rep(1,n)
+  }
+  
+  ### calculate true ATEs for validation
+  mu_adl_0_logit <- -1.0 + 1.0 * post_discharge_disability_scaled + -0.5 * 0 +
+    0.4 * stroke_severity_scaled + 0.2 * age_scaled + 
+    0.1 * comorbidity_scaled + -0.15 * 0 * post_discharge_disability_scaled
+  
+  mu_adl_1_logit <- -1.0 + 1.0 * post_discharge_disability_scaled + -0.5 * 1 +
+    0.4 * stroke_severity_scaled + 0.2 * age_scaled + 
+    0.1 * comorbidity_scaled + -0.15 * 1 * post_discharge_disability_scaled
+  
+  true_ate_adl <- mean(plogis(mu_adl_1_logit) - plogis(mu_adl_0_logit)) * 3.0
+  
+  ### calculate true ATTs for validation
+  # ATT = E[E[Y | A = 1, X] - E[Y | A = 0, X] | A = 1]
+  # using standardization: ATT = E[(Y(1) - Y(0)) * (f(1|X)] / E[f(1|X))]
+  # where f(1|X) is the propensity score P(A=1|X)
+  numerator_att <- mean((plogis(mu_adl_1_logit) - plogis(mu_adl_0_logit)) * ps)
+  denominator_att <- mean(ps)
+  true_att_adl <- (numerator_att / denominator_att) * 3.0
+  
+  ### compile dataset
+  data <- data.frame(id = 1:n,
+                     age = age,
+                     post_discharge_disability = post_discharge_disability,
+                     stroke_severity = stroke_severity,
+                     comorbidity = comorbidity,
+                     OUT3_ADL_IADL = OUT3_ADL_IADL_with_missing,
+                     OUT3_ADL_IADL_complete = OUT3_ADL_IADL,
+                     observed_adl = observed_adl,
+                     prob_observed_adl = prob_observed_adl,
+                     propensity_score = ps)
+  
+  # add exposure variable with the specified name
+  data[[exposure_name]] <- exposure
+  
+  ### return results
+  return(list(data = data,
+              true_ate_adl = true_ate_adl,
+              true_att_adl = true_att_adl,
+              simulation_params = list(n = n,
+                                       exposure_name = exposure_name,
+                                       phi_adl = phi_adl,
+                                       missing_outcome = missing_outcome,
+                                       prob_observed_baseline = prob_observed_baseline,
+                                       actual_missing_prop_adl = mean(observed_adl == 0)),
+              fixed_covariates = data.frame(age = age,
+                                            age_scaled = age_scaled,
+                                            post_discharge_disability = post_discharge_disability,
+                                            post_discharge_disability_scaled = post_discharge_disability_scaled,
+                                            stroke_severity = stroke_severity,
+                                            stroke_severity_scaled = stroke_severity_scaled,
+                                            comorbidity = comorbidity,
+                                            comorbidity_scaled = comorbidity_scaled)))
+}
+
+
+# Run a single simulation iteration for both ATE and ATT
+run_single_simulation <- function(n = 1000,
+                                  exposure_name = "rehabIRF",
+                                  trunc_level = 0.05,
+                                  missing_outcome = FALSE,
+                                  prob_observed_baseline = 0.8,
+                                  fixed_covariates = NULL) {
+  
+  # generate data (using fixed covariates if provided)
+  sim_data <- generate_stroke_data(n = n,
+                                   exposure_name = exposure_name,
+                                   missing_outcome = missing_outcome,
+                                   prob_observed_baseline = prob_observed_baseline,
+                                   fixed_covariates = fixed_covariates)
+  
+  data <- sim_data$data
+  
+  # determine which outcomes are observed
+  observed_adl <- data$observed_adl
+  
+  # re-scale outcomes to 0-1 for modeling
+  data$OUT3_ADL_IADL_01 <- data$OUT3_ADL_IADL / 3.0
+  
+  # apply transformation for beta regression to avoid boundary issues
+  N_adl <- nrow(data)
+  data$OUT3_ADL_IADL_01 <- (data$OUT3_ADL_IADL_01 * (N_adl - 1) + 0.5) / N_adl
+  
+  ### estimate propensity score model
+  # create formula dynamically
+  ps_formula <- as.formula(paste(exposure_name,
+                                 "~ age + post_discharge_disability + stroke_severity + comorbidity"))
+  ps_model <- glm(ps_formula,data = data,family = binomial())
+  
+  if (missing_outcome) {
+    # missing data model
+    missing_formula <- as.formula(paste("observed_adl ~",exposure_name,
+                                        "+ age + post_discharge_disability + stroke_severity + comorbidity"))
+    missing_model_adl <- glm(missing_formula,data = data,family = binomial())
+    
+    ### estimate outcome models on observed data only
+    data_obs_adl <- data[observed_adl == 1,]
+    
+    # outcome model (includes interaction term to match data generating mechanism)
+    outcome_formula <- as.formula(paste("OUT3_ADL_IADL_01 ~ age +",exposure_name,
+                                        "* post_discharge_disability + stroke_severity + comorbidity"))
+    adl_mod <- betareg(outcome_formula,data = data_obs_adl)
+    
+    ### apply TMLE for ATE with missing outcomes
+    results_ate <- robustcompATE_MAR(outcome_mod = adl_mod,
+                                     ps_mod = ps_model,
+                                     missing_mod = missing_model_adl,
+                                     covariates_full = data,
+                                     exposure_name = exposure_name,
+                                     outcome_observed = observed_adl,
+                                     trunc_level = trunc_level,
+                                     outcome_values = data$OUT3_ADL_IADL_01,
+                                     outcome_name = "OUT3_ADL_IADL_01",
+                                     scale_factor = 3.0)
+    
+    ### apply TMLE for ATT with missing outcomes
+    results_att <- robustcompATT_MAR(outcome_mod = adl_mod,
+                                     ps_mod = ps_model,
+                                     missing_mod = missing_model_adl,
+                                     covariates_full = data,
+                                     exposure_name = exposure_name,
+                                     outcome_observed = observed_adl,
+                                     outcome_values = data$OUT3_ADL_IADL_01,
+                                     outcome_name = "OUT3_ADL_IADL_01",
+                                     trunc_level = trunc_level,
+                                     scale_factor = 3.0,
+                                     max_iter = 100,
+                                     tol = 1e-15)
+    
+  } else {
+    # outcome model
+    outcome_formula <- as.formula(paste("OUT3_ADL_IADL_01 ~ age +",exposure_name,
+                                        "* post_discharge_disability + stroke_severity + comorbidity"))
+    adl_mod <- betareg(outcome_formula,data = data)
+    
+    ### apply TMLE for ATE
+    results_ate <- robustcompATE(outcome_mod = adl_mod,
+                                 ps_mod = ps_model,
+                                 covariates = data,
+                                 exposure_name = exposure_name,
+                                 outcome_name = "OUT3_ADL_IADL_01",
+                                 trunc_level = trunc_level,
+                                 scale_factor = 3.0)
+    
+    ### apply TMLE for ATT
+    results_att <- robustcompATT(outcome_mod = adl_mod,
+                                 ps_mod = ps_model,
+                                 covariates = data,
+                                 exposure_name = exposure_name,
+                                 outcome_name = "OUT3_ADL_IADL_01",
+                                 trunc_level = trunc_level,
+                                 scale_factor = 3.0)
+  }
+  
+  ### extract results
+  results_df <- data.frame(n = n,
+                           exposure_name = exposure_name,
+                           trunc_level = trunc_level,
+                           missing_outcome = missing_outcome,
+                           # ATE results
+                           ate_adl = results_ate$ATE,
+                           ate_se_adl = results_ate$SE,
+                           ate_ci_lower_adl = results_ate$CI["lower"],
+                           ate_ci_upper_adl = results_ate$CI["upper"],
+                           # ATT results
+                           att_adl = results_att$ATT,
+                           att_se_adl = results_att$SE,
+                           att_ci_lower_adl = results_att$CI["lower"],
+                           att_ci_upper_adl = results_att$CI["upper"],
+                           # true values
+                           true_ate_adl = sim_data$true_ate_adl,
+                           true_att_adl = sim_data$true_att_adl)
+  
+  return(results_df)
+}
+
+
+# Run full simulation study for both ATE and ATT
+run_simulation_study <- function(n_sims = 500,n = 1000,trunc_level = 0.05,
+                                 missing_outcome = FALSE,prob_observed_baseline = 0.8,
+                                 use_fixed_covariates = TRUE) {
+  
+  # if boolFixCovariates is TRUE, generate covariates once
+  fixed_covariates <- NULL
+  if (use_fixed_covariates) {
+    # set missing_outcome to be false here because we need to simulate covariates
+    initial_data <- generate_stroke_data(n = n,
+                                         missing_outcome = FALSE)
+    fixed_covariates <- initial_data$fixed_covariates
+  }
+  
+  # run simulations sequentially using same set of covariates
+  # each iteration will generate new treatment, outcomes, and censoring indicators
+  results_list <- lapply(1:n_sims,function(i) {
+    run_single_simulation(n = n,trunc_level = trunc_level,
+                          missing_outcome = missing_outcome,
+                          prob_observed_baseline = prob_observed_baseline,
+                          fixed_covariates = fixed_covariates)
+  })
+  
+  # combine results
+  results <- do.call(rbind,results_list)
+  
+  # calculate simulation performance metrics for ATE
+  results$ate_bias_adl <- results$ate_adl - results$true_ate_adl
+  results$ate_coverage_adl <- (results$ate_ci_lower_adl <= results$true_ate_adl) & 
+    (results$ate_ci_upper_adl >= results$true_ate_adl)
+  
+  # calculate simulation performance metrics for ATT
+  results$att_bias_adl <- results$att_adl - results$true_att_adl
+  results$att_coverage_adl <- (results$att_ci_lower_adl <= results$true_att_adl) & 
+    (results$att_ci_upper_adl >= results$true_att_adl)
+  
+  return(results)
+}
+
+# Summarize simulation results for both ATE and ATT
+summarize_simulation <- function(results) {
+  
+  # check if missing outcomes scenario
+  missing_outcome <- results$missing_outcome[1]
+  
+  # ATE summary statistics
+  ate_stats <- c(mean_estimate = mean(results$ate_adl),
+                 true_effect = mean(results$true_ate_adl),
+                 mean_bias = mean(results$ate_bias_adl),
+                 mean_se = mean(results$ate_se_adl),
+                 empirical_se = sd(results$ate_adl),
+                 coverage = mean(results$ate_coverage_adl))
+  
+  # ATT summary statistics
+  att_stats <- c(mean_estimate = mean(results$att_adl),
+                 true_effect = mean(results$true_att_adl),
+                 mean_bias = mean(results$att_bias_adl),
+                 mean_se = mean(results$att_se_adl),
+                 empirical_se = sd(results$att_adl),
+                 coverage = mean(results$att_coverage_adl))
+  
+  # Create summary table
+  summary_table <- data.frame(Estimand = c("ATE","ATT"),
+                              Mean_Estimate = round(c(ate_stats["mean_estimate"],att_stats["mean_estimate"]),4),
+                              True_Effect = round(c(ate_stats["true_effect"],att_stats["true_effect"]),4),
+                              Mean_Bias = round(c(ate_stats["mean_bias"],att_stats["mean_bias"]),4),
+                              Mean_SE = round(c(ate_stats["mean_se"],att_stats["mean_se"]),4),
+                              Empirical_SE = round(c(ate_stats["empirical_se"],att_stats["empirical_se"]),4),
+                              Coverage = round(c(ate_stats["coverage"],att_stats["coverage"]),3))
+  
+  cat("\n=== Simulation Summary ===\n\n")
+  print(summary_table,row.names = FALSE)
+  
+  return(summary_table)
+}
+
+
+
+### number of sims
+N_SIMS <- 200
+set.seed(80924)
+
+### completely observed outcomes
+# N = 500
+sim_results <- run_simulation_study(n_sims = N_SIMS,n = 625,
+                                    trunc_level = 0.005,
+                                    missing_outcome = FALSE,
+                                    prob_observed_baseline = 0.8,
+                                    use_fixed_covariates = TRUE)
+summary_results <- summarize_simulation(sim_results)
+
+# N = 1500
+sim_results <- run_simulation_study(n_sims = N_SIMS,n = 1875,
+                                    trunc_level = 0.005,
+                                    missing_outcome = FALSE,
+                                    prob_observed_baseline = 0.8,
+                                    use_fixed_covariates = TRUE)
+summary_results <- summarize_simulation(sim_results)
+
+
+
+### missing outcomes
+# N = 500
+sim_results <- run_simulation_study(n_sims = N_SIMS,n = 625,
+                                    trunc_level = 0.005,
+                                    missing_outcome = TRUE,
+                                    prob_observed_baseline = 0.8,
+                                    use_fixed_covariates = TRUE)
+summary_results <- summarize_simulation(sim_results)
+
+# N = 1500
+sim_results <- run_simulation_study(n_sims = N_SIMS,n = 1875,
+                                    trunc_level = 0.005,
+                                    missing_outcome = TRUE,
+                                    prob_observed_baseline = 0.8,
+                                    use_fixed_covariates = TRUE)
+summary_results <- summarize_simulation(sim_results)
+
+
+
+
+
+
