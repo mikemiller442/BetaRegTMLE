@@ -11,7 +11,6 @@
 library(betareg)
 
 
-
 # Calculates a robust TMLE estimator for the ATE for a single outcome
 robustcompATE <- function(outcome_mod,ps_mod,covariates,
                           exposure_name,outcome_name,
@@ -52,95 +51,66 @@ robustcompATE <- function(outcome_mod,ps_mod,covariates,
   ate_star <- pred_star_y_1 - pred_star_y_0
   ate_star_scaled <- ate_star * scale_factor
   
-  ### calculate efficient influence function
+  ### calculate scaled efficient influence function
   D_Y <- H_A_Y * (outcome_values - pred_star_y_A)
   D_W <- ate_star - mean(ate_star)
-  EIF <- D_Y + D_W
+  EIF <- (D_Y + D_W) * scale_factor
   
   ### calculate standard errors and confidence intervals
   n <- length(EIF)
   var_ate <- var(EIF) / n
-  se_ate_scaled <- sqrt(var_ate) * scale_factor
+  se_ate <- sqrt(var_ate)
   ate_mean <- mean(ate_star_scaled)
-  ci_lower <- ate_mean - qnorm(0.975) * se_ate_scaled
-  ci_upper <- ate_mean + qnorm(0.975) * se_ate_scaled
+  ci_lower <- ate_mean - qnorm(0.975) * se_ate
+  ci_upper <- ate_mean + qnorm(0.975) * se_ate
   
   ### return results
   return(list(ATE = ate_mean,
               ITE = ate_star_scaled,
               IF = EIF,
-              SE = se_ate_scaled,
+              SE = se_ate,
               CI = c(lower = ci_lower,upper = ci_upper)))
 }
 
 
-
-# Calculate ATE using robust TMLE estimates but ignoring unmeasured confounding
-calculate_ate_naive_robust <- function(data,exposure_name = "rehabIRF",
-                                       outcome_name_01,
-                                       scale_factor = 1.0,trunc_level = 0.05) {
-  
-  ps_formula <- as.formula(paste(exposure_name,"~ age + stroke_severity + comorbidity"))
-  ps_model <- glm(ps_formula,data = data,family = binomial())
-  outcome_formula <- as.formula(paste(outcome_name_01,"~",exposure_name,
-                                      "+ age + stroke_severity + comorbidity"))
-  outcome_mod <- betareg(outcome_formula,data = data)
-  results_ate <- robustcompATE(outcome_mod = outcome_mod,
-                               ps_mod = ps_model,
-                               covariates = data,
-                               exposure_name = exposure_name,
-                               outcome_name = outcome_name_01,
-                               trunc_level = trunc_level,
-                               scale_factor = scale_factor)
-  
-  ### return results
-  return(list(ATE = results_ate$ATE,
-              ITE = results_ate$ITE,
-              SE = results_ate$SE,
-              CI = results_ate$CI,
-              IF = results_ate$IF))
-}
-
-
-
 # Calculate LATE using robust TMLE estimates
-calculate_late_robust <- function(data,iv_name = "Z",
-                                  exposure_name = "rehabIRF",
-                                  outcome_name_01,
-                                  scale_factor = 1.0,trunc_level = 0.05) {
+calculate_late_robust <- function(data,outcome_mod_y,outcome_mod_a,iv_model,
+                                  iv_name = "Z",exposure_name = "rehabIRF",outcome_name_01,
+                                  scale_factor = 1.0,trunc_level_num = 0.001,
+                                  trunc_level_denom = 0.001) {
   
-  ### calculate ATE for numerator
-  iv_formula <- as.formula(paste(iv_name,"~ age + stroke_severity + comorbidity"))
-  iv_model <- glm(iv_formula,data = data,family = binomial())
-  outcome_formula_y <- as.formula(paste(outcome_name_01,"~",iv_name,
-                                        "+ age + stroke_severity + comorbidity"))
-  outcome_mod_y <- betareg(outcome_formula_y,data = data)
+  ### calculate ATE for numerator (effect of Z on Y)
   results_numerator <- robustcompATE(outcome_mod = outcome_mod_y,
                                      ps_mod = iv_model,
                                      covariates = data,
                                      exposure_name = iv_name,
                                      outcome_name = outcome_name_01,
-                                     trunc_level = trunc_level,
+                                     trunc_level = trunc_level_num,
                                      scale_factor = scale_factor)
   
-  ### calculate ATE for denominator
-  outcome_formula_a <- as.formula(paste(exposure_name,"~",iv_name,
-                                        "+ age + stroke_severity + comorbidity"))
-  outcome_mod_a <- glm(outcome_formula_a,data = data,family = binomial())
+  ### calculate ATE for denominator (effect of Z on A)
   results_denominator <- robustcompATE(outcome_mod = outcome_mod_a,
                                        ps_mod = iv_model,
                                        covariates = data,
                                        exposure_name = iv_name,
                                        outcome_name = exposure_name,
-                                       trunc_level = trunc_level,
+                                       trunc_level = trunc_level_denom,
                                        scale_factor = 1.0)
   
   ### calculate LATE and approximate 95% confidence interval using delta method
   numerator <- results_numerator$ATE
   denominator <- results_denominator$ATE
   late <- numerator / denominator
-  var_late <- ((1/denominator)^2 * results_numerator$SE^2
-               + (numerator/denominator^2)^2 * results_denominator$SE^2)
+  
+  ### delta method for variance of ratio using influence functions
+  IF_numerator <- results_numerator$IF
+  IF_denominator <- results_denominator$IF
+  
+  # IF for ratio: (IF_num - LATE * IF_denom) / denom
+  IF_late <- (IF_numerator - late * IF_denominator) / denominator
+  
+  n <- nrow(data)
+  var_late <- var(IF_late) / n
   se_late <- sqrt(var_late)
   ci_lower <- late - qnorm(0.975) * se_late
   ci_upper <- late + qnorm(0.975) * se_late
@@ -152,9 +122,11 @@ calculate_late_robust <- function(data,iv_name = "Z",
               numerator = numerator,
               denominator = denominator,
               numerator_se = results_numerator$SE,
-              denominator_se = results_denominator$SE))
+              denominator_se = results_denominator$SE,
+              IF = IF_late,
+              IF_numerator = IF_numerator,
+              IF_denominator = IF_denominator))
 }
-
 
 
 # Calculate robust ATE using doubly robust g-estimation with IV
@@ -163,9 +135,9 @@ calculate_ate_iv_robust <- function(outcome_mod_init,iv_model,data,
                                     iv_name = "Z",
                                     exposure_name = "rehabIRF",
                                     outcome_name_01,
-                                    scale_factor = 1.0,trunc_level = 0.05) {
+                                    scale_factor = 1.0,trunc_level = 0.001) {
   
-  # Extract IV and exposure variables
+  # extract IV and exposure variables
   Z <- data[[iv_name]]
   D <- data[[exposure_name]]
   
@@ -184,7 +156,6 @@ calculate_ate_iv_robust <- function(outcome_mod_init,iv_model,data,
                             family = binomial())
   P_D0 <- predict(exp_model_weighted,newdata = data,type = "response")
   
-  
   ### solve estimating equation (14) for delta_D(X)
   data_z1 <- data[Z == 1,]
   D_z1 <- D[Z == 1]
@@ -198,7 +169,6 @@ calculate_ate_iv_robust <- function(outcome_mod_init,iv_model,data,
                     data = data_z1,
                     weights = weights_z1)
   delta_D_X <- predict(delta_d_mod,newdata = data)
-  
   
   ### calculate P_0^Y(X)
   P_Y_init <- predict(outcome_mod_init,newdata = data,type = "response")
@@ -232,7 +202,6 @@ calculate_ate_iv_robust <- function(outcome_mod_init,iv_model,data,
   X_matrix_full <- model.matrix(delta_formula,data = data)
   delta_X <- as.vector(X_matrix_full %*% alpha_hat)
   
-  
   ### calculate multiply robust estimator (15)
   Y_minus_PY0 <- Y_values - P_Y0
   D_minus_PD0 <- D - P_D0
@@ -260,7 +229,6 @@ calculate_ate_iv_robust <- function(outcome_mod_init,iv_model,data,
               delta_D_X = delta_D_X,
               delta_X = delta_X))
 }
-
 
 
 # Generate simulated data with instrumental variable for causal inference
@@ -292,7 +260,7 @@ generate_stroke_data_iv <- function(n = 1000,
     comorbidity <- pmin(comorbidity,10)
     comorbidity_scaled <- (comorbidity - mean(comorbidity)) / sd(comorbidity)
   } else {
-    # Use fixed covariates
+    # use fixed covariates
     age <- fixed_covariates$age
     age_scaled <- fixed_covariates$age_scaled
     stroke_severity <- fixed_covariates$stroke_severity
@@ -316,12 +284,12 @@ generate_stroke_data_iv <- function(n = 1000,
   ### generate treatment assignment using linear probability model
   # no Z-U interaction on the additive scale
   # higher post_discharge_disability -> higher treatment probability
-  ps <- 0.28 + 
+  ps <- 0.20 + 
     iv_strength * IV +
-    0.03 * age_scaled +
-    0.08 * post_discharge_disability_scaled +
-    0.03 * stroke_severity_scaled +
-    -0.02 * comorbidity_scaled
+    0.02 * age_scaled +
+    0.05 * post_discharge_disability_scaled +
+    0.02 * stroke_severity_scaled +
+    -0.01 * comorbidity_scaled
   
   # check for invalid probabilities
   if (any(ps < 0 | ps > 1)) {
@@ -342,8 +310,7 @@ generate_stroke_data_iv <- function(n = 1000,
     -0.5 * exposure +
     0.4 * stroke_severity_scaled + 
     0.2 * age_scaled + 
-    0.1 * comorbidity_scaled +
-    -0.15 * exposure * post_discharge_disability_scaled
+    0.1 * comorbidity_scaled
   
   mu_adl <- plogis(mu_adl_logit)
   
@@ -357,11 +324,11 @@ generate_stroke_data_iv <- function(n = 1000,
   ### calculate true ATE of treatment A on outcome Y
   mu_adl_0_logit <- -1.0 + 1.0 * post_discharge_disability_scaled + -0.5 * 0 +
     0.4 * stroke_severity_scaled + 0.2 * age_scaled + 
-    0.1 * comorbidity_scaled + -0.15 * 0 * post_discharge_disability_scaled
+    0.1 * comorbidity_scaled
   
   mu_adl_1_logit <- -1.0 + 1.0 * post_discharge_disability_scaled + -0.5 * 1 +
     0.4 * stroke_severity_scaled + 0.2 * age_scaled + 
-    0.1 * comorbidity_scaled + -0.15 * 1 * post_discharge_disability_scaled
+    0.1 * comorbidity_scaled
   
   true_ate_adl <- mean(plogis(mu_adl_1_logit) - plogis(mu_adl_0_logit)) * 3.0
   
@@ -398,14 +365,11 @@ generate_stroke_data_iv <- function(n = 1000,
 }
 
 
-
-
-
 # Run a single simulation iteration for IV analysis
 run_single_simulation_iv <- function(n = 1000,
                                      iv_name = "Z",
                                      exposure_name = "rehabIRF",
-                                     trunc_level = 0.05,
+                                     trunc_level = 0.001,
                                      iv_strength = 0.5,
                                      fixed_covariates = NULL,
                                      return_vectors = TRUE) {
@@ -426,37 +390,62 @@ run_single_simulation_iv <- function(n = 1000,
   N <- nrow(data)
   data$OUT3_ADL_IADL_01 <- (data$OUT3_ADL_IADL_01 * (N - 1) + 0.5) / N
   
-  ### Fit models needed for ATE calculation
-  # IV propensity score model
+  ### fit models needed for analysis
+  # IV propensity score model P(Z|W)
   iv_formula <- as.formula(paste(iv_name,"~ age + stroke_severity + comorbidity"))
   iv_model <- glm(iv_formula,data = data,family = binomial())
   
-  # Initial outcome model
-  outcome_model <- betareg(OUT3_ADL_IADL_01 ~ age + stroke_severity + comorbidity,
-                           data = data)
+  # outcome model E[Y|Z,W] for LATE numerator
+  outcome_formula_y <- as.formula(paste("OUT3_ADL_IADL_01 ~",iv_name,
+                                        "+ age + stroke_severity + comorbidity"))
+  outcome_mod_y <- betareg(outcome_formula_y,data = data)
   
-  # Define formulas for ATE calculation
+  # exposure model E[A|Z,W] for LATE denominator
+  outcome_formula_a <- as.formula(paste(exposure_name,"~",iv_name,
+                                        "+ age + stroke_severity + comorbidity"))
+  outcome_mod_a <- glm(outcome_formula_a,data = data,family = binomial())
+  
+  # initial outcome model for IV-based ATE (without Z)
+  outcome_model_init <- betareg(OUT3_ADL_IADL_01 ~ age + stroke_severity + comorbidity,
+                                data = data)
+  
+  # propensity score model for naive ATE P(A|W)
+  ps_formula_naive <- as.formula(paste(exposure_name,"~ age + stroke_severity + comorbidity"))
+  ps_model_naive <- glm(ps_formula_naive,data = data,family = binomial())
+  
+  # outcome model E[Y|A,W] for naive ATE
+  outcome_formula_naive <- as.formula(paste("OUT3_ADL_IADL_01 ~",exposure_name,
+                                            "+ age + stroke_severity + comorbidity"))
+  outcome_mod_naive <- betareg(outcome_formula_naive,data = data)
+  
+  # define formulas for ATE calculation
   exp_model_formula <- as.formula(paste(exposure_name,"~ age + stroke_severity + comorbidity"))
   delta_formula <- ~ age + stroke_severity + comorbidity
   
   ### calculate naive ATE for ADL
   ### ignores unmeasured confounding
-  ate_adl_naive <- calculate_ate_naive_robust(data = data,
-                                              exposure_name = exposure_name,
-                                              outcome_name_01 = "OUT3_ADL_IADL_01",
-                                              scale_factor = 3.0,
-                                              trunc_level = trunc_level)
+  ate_adl_naive <- robustcompATE(outcome_mod = outcome_mod_naive,
+                                 ps_mod = ps_model_naive,
+                                 covariates = data,
+                                 exposure_name = exposure_name,
+                                 outcome_name = "OUT3_ADL_IADL_01",
+                                 trunc_level = trunc_level,
+                                 scale_factor = 3.0)
   
   ### calculate LATE for ADL
   late_adl <- calculate_late_robust(data = data,
+                                    outcome_mod_y = outcome_mod_y,
+                                    outcome_mod_a = outcome_mod_a,
+                                    iv_model = iv_model,
                                     iv_name = iv_name,
                                     exposure_name = exposure_name,
                                     outcome_name_01 = "OUT3_ADL_IADL_01",
                                     scale_factor = 3.0,
-                                    trunc_level = trunc_level)
+                                    trunc_level_num = trunc_level,
+                                    trunc_level_denom = trunc_level)
   
   ### calculate robust ATE
-  ate_adl <- calculate_ate_iv_robust(outcome_mod_init = outcome_model,
+  ate_adl <- calculate_ate_iv_robust(outcome_mod_init = outcome_model_init,
                                      iv_model = iv_model,
                                      data = data,
                                      exp_model_formula = exp_model_formula,
@@ -484,7 +473,7 @@ run_single_simulation_iv <- function(n = 1000,
                              late_denominator_adl = late_adl$denominator,
                              late_numerator_se_adl = late_adl$numerator_se,
                              late_denominator_se_adl = late_adl$denominator_se,
-                             # ATE results for ADL (IV-based)
+                             # ATE results for ADL
                              ate_adl = ate_adl$ATE,
                              ate_se_adl = ate_adl$SE,
                              ate_ci_lower_adl = ate_adl$CI["lower"],
@@ -518,7 +507,7 @@ run_single_simulation_iv <- function(n = 1000,
                              late_denominator_adl = late_adl$denominator,
                              late_numerator_se_adl = late_adl$numerator_se,
                              late_denominator_se_adl = late_adl$denominator_se,
-                             # ATE results for ADL (IV-based)
+                             # ATE results for ADL
                              ate_adl = ate_adl$ATE,
                              ate_se_adl = ate_adl$SE,
                              ate_ci_lower_adl = ate_adl$CI["lower"],
@@ -549,12 +538,11 @@ run_single_simulation_iv <- function(n = 1000,
 }
 
 
-
 # Run simulation study for IV analysis
 run_simulation_study_iv <- function(n_sims = 500,n = 1000,
                                     iv_name = "Z",
                                     exposure_name = "rehabIRF",
-                                    trunc_level = 0.05,iv_strength = 0.5,
+                                    trunc_level = 0.001,iv_strength = 0.5,
                                     use_fixed_covariates = TRUE) {
   
   # generate fixed covariates once if requested
@@ -568,9 +556,15 @@ run_simulation_study_iv <- function(n_sims = 500,n = 1000,
     fixed_covariates <- initial_data$fixed_covariates
   }
   
-  # run sims sequentially
-  results_list <- lapply(1:n_sims,function(i) {
-    tryCatch({
+  # initialize results list
+  results_list <- vector("list",n_sims)
+  
+  # initialize progress bar
+  pb <- txtProgressBar(min = 0,max = n_sims,style = 3)
+  
+  # run sims sequentially with progress bar
+  for (i in 1:n_sims) {
+    results_list[[i]] <- tryCatch({
       run_single_simulation_iv(n = n,
                                iv_name = iv_name,
                                exposure_name = exposure_name,
@@ -579,11 +573,15 @@ run_simulation_study_iv <- function(n_sims = 500,n = 1000,
                                fixed_covariates = fixed_covariates,
                                return_vectors = FALSE)
     },error = function(e) {
-      cat(paste("Error in simulation",i,":",e$message,"\n"))
+      cat(paste("\nError in simulation",i,":",e$message,"\n"))
       return(NULL)
     })
-  })
+    setTxtProgressBar(pb,i)
+  }
   
+  close(pb)
+  
+  # remove NULL results from failed simulations
   results_list <- results_list[!sapply(results_list,is.null)]
   results <- do.call(rbind,results_list)
   
@@ -612,7 +610,7 @@ run_simulation_study_iv <- function(n_sims = 500,n = 1000,
 }
 
 
-# Summarize IV simulation results for LATE, ATE, and naive ATE
+# Summarize IV simulation results for LATE,ATE,and naive ATE
 summarize_simulation_iv <- function(results) {
   
   # naive ATE summary statistics
@@ -633,7 +631,7 @@ summarize_simulation_iv <- function(results) {
                        mean_numerator_se = mean(results$late_numerator_se_adl),
                        mean_denominator_se = mean(results$late_denominator_se_adl))
   
-  # ATE summary statistics (IV-based)
+  # ATE summary statistics
   ate_summary <- list(mean_estimate = mean(results$ate_adl),
                       mean_bias = mean(results$ate_bias_adl),
                       mean_se = mean(results$ate_se_adl),
@@ -663,6 +661,7 @@ summarize_simulation_iv <- function(results) {
   
   return(summary_stats)
 }
+
 
 # Print formatted summary of IV simulation results
 print_simulation_summary_iv <- function(summary_stats) {
@@ -694,7 +693,7 @@ print_simulation_summary_iv <- function(summary_stats) {
               summary_stats$ATE_naive$empirical_se,
               summary_stats$ATE_naive$coverage))
   
-  # LATE results (now includes coverage)
+  # LATE results
   cat(sprintf("LATE        %.4f   %.4f   %.4f   %.4f   %.3f\n",
               summary_stats$LATE$mean_estimate,
               summary_stats$LATE$mean_bias,
@@ -702,7 +701,7 @@ print_simulation_summary_iv <- function(summary_stats) {
               summary_stats$LATE$empirical_se,
               summary_stats$LATE$coverage))
   
-  # ATE results (IV-based)
+  # ATE results
   cat(sprintf("ATE (IV)    %.4f   %.4f   %.4f   %.4f   %.3f\n",
               summary_stats$ATE$mean_estimate,
               summary_stats$ATE$mean_bias,
@@ -715,44 +714,27 @@ print_simulation_summary_iv <- function(summary_stats) {
 
 
 
-
-
-
-
 # number of sims
 N_SIMS <- 800
-set.seed(80924)
-
-# run simulation study with N = 500
-sim_results <- run_simulation_study_iv(n_sims = N_SIMS,n = 500,
-                                       trunc_level = 0.005,iv_strength = 0.35,
-                                       use_fixed_covariates = TRUE)
-
-# summarize and print
-sim_summary <- summarize_simulation_iv(sim_results)
-print_simulation_summary_iv(sim_summary)
+# set.seed(80924)
 
 # run simulation study with N = 1500
 sim_results <- run_simulation_study_iv(n_sims = N_SIMS,n = 1500,
-                                       trunc_level = 0.005,iv_strength = 0.35,
+                                       trunc_level = 0.001,iv_strength = 0.4,
                                        use_fixed_covariates = TRUE)
 
 # summarize and print
 sim_summary <- summarize_simulation_iv(sim_results)
 print_simulation_summary_iv(sim_summary)
 
-# run simulation study with N = 5000
-sim_results <- run_simulation_study_iv(n_sims = N_SIMS,n = 5000,
-                                       trunc_level = 0.005,iv_strength = 0.35,
-                                       use_fixed_covariates = TRUE)
+# run simulation study with N = 8000
+sim_results <- run_simulation_study_iv(n_sims = N_SIMS,n = 8000,
+                                       trunc_level = 0.001,iv_strength = 0.4,
+                                       use_fixed_covariates = FALSE)
 
 # summarize and print
 sim_summary <- summarize_simulation_iv(sim_results)
 print_simulation_summary_iv(sim_summary)
-
-
-
-
 
 
 

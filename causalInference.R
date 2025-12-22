@@ -11,7 +11,6 @@
 library(betareg)
 
 
-
 # Calculates a robust TMLE estimator for the ATE for a single outcome
 robustcompATE <- function(outcome_mod,ps_mod,covariates,
                           exposure_name,outcome_name,
@@ -52,24 +51,24 @@ robustcompATE <- function(outcome_mod,ps_mod,covariates,
   ate_star <- pred_star_y_1 - pred_star_y_0
   ate_star_scaled <- ate_star * scale_factor
   
-  ### calculate efficient influence function
+  ### calculate scaled efficient influence function
   D_Y <- H_A_Y * (outcome_values - pred_star_y_A)
   D_W <- ate_star - mean(ate_star)
-  EIF <- D_Y + D_W
+  EIF <- (D_Y + D_W) * scale_factor
   
   ### calculate standard errors and confidence intervals
   n <- length(EIF)
   var_ate <- var(EIF) / n
-  se_ate_scaled <- sqrt(var_ate) * scale_factor
+  se_ate <- sqrt(var_ate)
   ate_mean <- mean(ate_star_scaled)
-  ci_lower <- ate_mean - qnorm(0.975) * se_ate_scaled
-  ci_upper <- ate_mean + qnorm(0.975) * se_ate_scaled
+  ci_lower <- ate_mean - qnorm(0.975) * se_ate
+  ci_upper <- ate_mean + qnorm(0.975) * se_ate
   
   ### return results
   return(list(ATE = ate_mean,
               ITE = ate_star_scaled,
               IF = EIF,
-              SE = se_ate_scaled,
+              SE = se_ate,
               CI = c(lower = ci_lower,upper = ci_upper)))
 }
 
@@ -149,81 +148,79 @@ robustcompATT <- function(outcome_mod,ps_mod,covariates,
 }
 
 
-# Calculates a robust TMLE estimator for the ATE with missing outcomes
+# Calculates a robust TMLE estimator for the ATE with missing at random outcomes
 robustcompATE_MAR <- function(outcome_mod,ps_mod,missing_mod,
                               covariates_full,exposure_name,
-                              outcome_observed,trunc_level,
-                              outcome_values,outcome_name,
-                              scale_factor = 1.0) {
+                              outcome_observed,outcome_values,outcome_name,
+                              trunc_level,scale_factor = 1.0) {
+  
+  n <- nrow(covariates_full)
+  exposure <- covariates_full[[exposure_name]]
+  
+  ### calculate propensity score for exposure (instrument)
+  ps_pred <- predict(ps_mod,newdata = covariates_full,type = "response")
+  ps_trunc <- pmax(pmin(ps_pred,1.0 - trunc_level),trunc_level)
+  
+  ### calculate probability of being observed (A=1)
+  prob_observed <- predict(missing_mod,newdata = covariates_full,type = "response")
+  prob_observed_trunc <- pmax(pmin(prob_observed,1.0 - trunc_level),trunc_level)
   
   ### calculate clever covariates for TMLE
-  exposure <- covariates_full[[exposure_name]]
-  ps_pred <- predict(ps_mod,type = "response")
-  ps_trunc <- pmax(pmin(ps_pred,1.0 - trunc_level),trunc_level)
-  trunc_weights_exposure_0 <- ifelse(exposure == 0,-1.0 / (1.0 - ps_trunc),0)
-  trunc_weights_exposure_1 <- ifelse(exposure == 1,1.0 / ps_trunc,0)
-  prob_obs <- predict(missing_mod,type = "response")
-  covariates_0 <- covariates_full
-  covariates_0[[exposure_name]] <- 0
-  covariates_1 <- covariates_full
-  covariates_1[[exposure_name]] <- 1
-  prob_obs_0 <- predict(missing_mod,
-                        newdata = covariates_0,
-                        type = "response")
-  prob_obs_0_trunc <- pmax(pmin(prob_obs_0,1.0 - trunc_level),trunc_level)
-  prob_obs_1 <- predict(missing_mod,
-                        newdata = covariates_1,
-                        type = "response")
-  prob_obs_1_trunc <- pmax(pmin(prob_obs_1,1.0 - trunc_level),trunc_level)
-  trunc_weights_missing_0 <- ifelse(outcome_observed == 1,1.0 / prob_obs_0_trunc,0)
-  trunc_weights_missing_1 <- ifelse(outcome_observed == 1,1.0 / prob_obs_1_trunc,0)
-  n_total <- nrow(covariates_full)
-  combined_weights_0 <- trunc_weights_exposure_0 * trunc_weights_missing_0
-  combined_weights_1 <- trunc_weights_exposure_1 * trunc_weights_missing_1
-  H_0_Y <- combined_weights_0
-  H_1_Y <- combined_weights_1
+  trunc_weights_0 <- ifelse(exposure == 0 & outcome_observed == 1,
+                            -1.0 / ((1.0 - ps_trunc) * prob_observed_trunc),0)
+  trunc_weights_1 <- ifelse(exposure == 1 & outcome_observed == 1,
+                            1.0 / (ps_trunc * prob_observed_trunc),0)
+  H_0_Y <- -1.0 * ifelse(outcome_observed == 1,1 / ((1.0 - ps_trunc) * prob_observed_trunc),0)
+  H_1_Y <- ifelse(outcome_observed == 1,1 / (ps_trunc * prob_observed_trunc),0)
   H_A_Y <- ifelse(exposure == 1,H_1_Y,H_0_Y)
-  H_A_Y_observed <- H_A_Y * outcome_observed
   
-  ### estimate fluctuation parameter
-  pred_y_full <- predict(outcome_mod,newdata = covariates_full,type = "response")
-  obs_indices <- which(outcome_observed == 1)
-  data_tmle <- data.frame(Y = outcome_values[obs_indices],
-                          pred_vals = pred_y_full[obs_indices],
-                          H_A_Y = H_A_Y[obs_indices])
+  ### estimate fluctuation parameter using observed data only
+  pred_y <- predict(outcome_mod,newdata = covariates_full,type = "response")
+  obs_idx <- which(outcome_observed == 1)
+  
+  data_tmle <- data.frame(Y = outcome_values[obs_idx],
+                          pred_vals = pred_y[obs_idx],
+                          H_A_Y = H_A_Y[obs_idx])
   eps <- coef(glm(Y ~ -1 + offset(qlogis(pred_vals)) + H_A_Y,
                   data = data_tmle,family = "binomial"))
   
   ### update predictions using fluctuation parameter
-  pred_y_A <- pred_y_full
-  pred_y_0 <- predict(outcome_mod,covariates_0,type = "response")
-  pred_y_1 <- predict(outcome_mod,covariates_1,type = "response")
+  covariates_0 <- covariates_full
+  covariates_0[[exposure_name]] <- 0
+  covariates_1 <- covariates_full
+  covariates_1[[exposure_name]] <- 1
+  
+  pred_y_0 <- predict(outcome_mod,newdata = covariates_0,type = "response")
+  pred_y_1 <- predict(outcome_mod,newdata = covariates_1,type = "response")
+  pred_y_A <- predict(outcome_mod,newdata = covariates_full,type = "response")
+  
   pred_star_y_A <- plogis(qlogis(pred_y_A) + eps * H_A_Y)
   pred_star_y_0 <- plogis(qlogis(pred_y_0) + eps * H_0_Y)
   pred_star_y_1 <- plogis(qlogis(pred_y_1) + eps * H_1_Y)
   
-  ### calculate ATE using targeted estimates for the full dataset
+  ### calculate ATE using targeted estimates
   ate_star <- pred_star_y_1 - pred_star_y_0
   ate_star_scaled <- ate_star * scale_factor
   
-  ### calculate efficient influence function
-  D_Y <- outcome_observed * H_A_Y * (outcome_values - pred_star_y_A)
-  D_Y[is.na(D_Y)] <- 0
+  ### calculate scaled efficient influence function
+  D_Y <- ifelse(outcome_observed == 1,
+                H_A_Y * (outcome_values - pred_star_y_A),
+                0)
   D_W <- ate_star - mean(ate_star)
-  EIF <- D_Y + D_W
+  EIF <- (D_Y + D_W) * scale_factor
   
-  ### calculate 95% confidence intervals
-  var_ate <- var(EIF) / n_total
-  se_ate_scaled <- sqrt(var_ate) * scale_factor
+  ### calculate standard errors and confidence intervals
+  var_ate <- var(EIF) / n
+  se_ate <- sqrt(var_ate)
   ate_mean <- mean(ate_star_scaled)
-  ci_lower <- ate_mean - qnorm(0.975) * se_ate_scaled
-  ci_upper <- ate_mean + qnorm(0.975) * se_ate_scaled
+  ci_lower <- ate_mean - qnorm(0.975) * se_ate
+  ci_upper <- ate_mean + qnorm(0.975) * se_ate
   
   ### return results
   return(list(ATE = ate_mean,
               ITE = ate_star_scaled,
               IF = EIF,
-              SE = se_ate_scaled,
+              SE = se_ate,
               CI = c(lower = ci_lower,upper = ci_upper)))
 }
 
@@ -660,7 +657,7 @@ summarize_simulation <- function(results) {
                  empirical_se = sd(results$att_adl),
                  coverage = mean(results$att_coverage_adl))
   
-  # Create summary table
+  # create summary table
   summary_table <- data.frame(Estimand = c("ATE","ATT"),
                               Mean_Estimate = round(c(ate_stats["mean_estimate"],att_stats["mean_estimate"]),4),
                               True_Effect = round(c(ate_stats["true_effect"],att_stats["true_effect"]),4),
@@ -678,8 +675,8 @@ summarize_simulation <- function(results) {
 
 
 ### number of sims
-N_SIMS <- 200
-set.seed(80924)
+N_SIMS <- 800
+# set.seed(80924)
 
 ### completely observed outcomes
 # N = 500
