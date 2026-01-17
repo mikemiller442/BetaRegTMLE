@@ -124,9 +124,14 @@ robustcompNIE_reduced_form <- function(outcome_mod,mediator_mod,iv_mod,ps_mod,co
   # P(M=m|A=0,W) evaluated at observed Z
   pM_at_Z_given_a0 <- ifelse(iv == 1,pM1_given_a0,1 - pM1_given_a0)
   # P(M=m|A=1,W) evaluated at observed Z
+  # in general this would be used, but not in the IV setting because
+  # the instrument density is used in the denominator instead of
+  # the mediator density
   pM_at_Z_given_a1 <- ifelse(iv == 1,pM1_given_a1,1 - pM1_given_a1)
   
   ### calculate density ratio for first component
+  # in general would need to use pZ given a1 but in the IV setting the
+  # instrument is independent of the exposure
   density_ratio <- pM_at_Z_given_a0 / pZ_at_obs
   H_Y <- ifelse(exposure == 1,
                 (1 - density_ratio) / ps_trunc,
@@ -141,8 +146,6 @@ robustcompNIE_reduced_form <- function(outcome_mod,mediator_mod,iv_mod,ps_mod,co
                             H_Y = H_Y)
   eps_y <- coef(glm(Y ~ -1 + offset(qlogis(pred_vals)) + H_Y,
                     data = data_tmle_y,family = "binomial"))
-  
-  
   pred_y_star <- plogis(qlogis(pred_y) + eps_y * H_Y)
   
   ### calculate Q_bar_Y(W, A=1, Z) for Z=0 and Z=1
@@ -169,7 +172,7 @@ robustcompNIE_reduced_form <- function(outcome_mod,mediator_mod,iv_mod,ps_mod,co
   Q_bar_Y_a1_z0_star <- plogis(qlogis(pred_y_a1_z0) + eps_y * H_Y_z0)
   Q_bar_Y_a1_z1_star <- plogis(qlogis(pred_y_a1_z1) + eps_y * H_Y_z1)
   
-  ### calculate psi_NIE using mediator density
+  ### calculate psi_NIE using mediator density and updated Q_bar predictions
   # psi_NIE,Z(w, a) = E_M[Q_bar_Y(w, 1, M) | W=w, A=a]
   # For binary M: = P(M=1|W,A=a) * Q_bar_Y(w,1,Z=1) + P(M=0|W,A=a) * Q_bar_Y(w,1,Z=0)
   
@@ -197,55 +200,25 @@ robustcompNIE_reduced_form <- function(outcome_mod,mediator_mod,iv_mod,ps_mod,co
   H_Z_1 <- ifelse(exposure == 1,1 / ps_trunc,0)
   H_Z_0 <- ifelse(exposure == 0,1 / (1 - ps_trunc),0)
   
-  # scale psi_nie for beta regression targeting
-  min_psi <- min(c(psi_nie_a1,psi_nie_a0))
-  max_psi <- max(c(psi_nie_a1,psi_nie_a0))
-  range_psi <- max_psi - min_psi
-  if (range_psi < 1e-10) range_psi <- 1
-  
-  scale_psi <- function(x) {
-    x_scaled <- (x - min_psi) / range_psi
-    (x_scaled * (n - 1) + 0.5) / n
-  }
-  
-  unscale_psi <- function(x_scaled) {
-    x_unscaled <- (x_scaled * n - 0.5) / (n - 1)
-    x_unscaled * range_psi + min_psi
-  }
-  
-  psi_nie_a1_scaled <- scale_psi(psi_nie_a1)
-  psi_nie_a1_scaled <- pmax(pmin(psi_nie_a1_scaled,1 - 1e-6),1e-6)
-  
-  psi_nie_a0_scaled <- scale_psi(psi_nie_a0)
-  psi_nie_a0_scaled <- pmax(pmin(psi_nie_a0_scaled,1 - 1e-6),1e-6)
-  
-  Q_bar_Y_a1_m_scaled <- scale_psi(Q_bar_Y_a1_m_star)
-  Q_bar_Y_a1_m_scaled <- pmax(pmin(Q_bar_Y_a1_m_scaled,1 - 1e-6),1e-6)
-  
   # target for A=1 using Q_bar_Y(W,1,M) as pseudo-outcome
-  data_tmle_a1 <- data.frame(pseudo_outcome = Q_bar_Y_a1_m_scaled,
-                             pred_vals = psi_nie_a1_scaled,
+  data_tmle_a1 <- data.frame(pseudo_outcome = Q_bar_Y_a1_m_star,
+                             pred_vals = psi_nie_a1,
                              H_Z_1 = H_Z_1)
   data_tmle_a1_subset <- data_tmle_a1[exposure == 1,]
   eps_nie_1 <- coef(glm(pseudo_outcome ~ -1 + offset(qlogis(pred_vals)) + H_Z_1,
                         data = data_tmle_a1_subset,family = "binomial"))
   
   # target for A=0 using Q_bar_Y(W,1,M) as pseudo-outcome
-  data_tmle_a0 <- data.frame(pseudo_outcome = Q_bar_Y_a1_m_scaled,
-                             pred_vals = psi_nie_a0_scaled,
+  data_tmle_a0 <- data.frame(pseudo_outcome = Q_bar_Y_a1_m_star,
+                             pred_vals = psi_nie_a0,
                              H_Z_0 = H_Z_0)
   data_tmle_a0_subset <- data_tmle_a0[exposure == 0,]
   eps_nie_0 <- coef(glm(pseudo_outcome ~ -1 + offset(qlogis(pred_vals)) + H_Z_0,
                         data = data_tmle_a0_subset,family = "binomial"))
   
   # calculate targeted estimates
-  psi_nie_a1_star_scaled <- plogis(qlogis(psi_nie_a1_scaled) + eps_nie_1 * H_Z_1)
-  psi_nie_a0_star_scaled <- plogis(qlogis(psi_nie_a0_scaled) + eps_nie_0 * H_Z_0)
-  
-  # transform back to original scale
-  psi_nie_a1_star <- unscale_psi(psi_nie_a1_star_scaled)
-  psi_nie_a0_star <- unscale_psi(psi_nie_a0_star_scaled)
-  Q_bar_Y_a1_m_unscaled <- unscale_psi(Q_bar_Y_a1_m_scaled)
+  psi_nie_a1_star <- plogis(qlogis(psi_nie_a1) + eps_nie_1 * H_Z_1)
+  psi_nie_a0_star <- plogis(qlogis(psi_nie_a0) + eps_nie_0 * H_Z_0)
   
   ### calculate reduced form NIE
   nie_vec <- (psi_nie_a1_star - psi_nie_a0_star) * scale_factor
@@ -254,7 +227,7 @@ robustcompNIE_reduced_form <- function(outcome_mod,mediator_mod,iv_mod,ps_mod,co
   ### calculate the efficient influence function
   D_Y <- H_Y * (outcome - pred_y_star)
   psi_nie_A_star <- ifelse(exposure == 1,psi_nie_a1_star,psi_nie_a0_star)
-  residual <- Q_bar_Y_a1_m_unscaled - psi_nie_A_star
+  residual <- Q_bar_Y_a1_m_star - psi_nie_A_star
   H_Z <- (2 * exposure - 1) / ifelse(exposure == 1,ps_trunc,1 - ps_trunc)
   D_Z <- H_Z * residual
   D_W <- nie_vec - nie_est
@@ -705,7 +678,7 @@ run_single_simulation_iv_mediation <- function(n = 1000,
 }
 
 
-# full simulation study
+# run simulation study
 run_simulation_study_iv_mediation <- function(n_sims = 100,
                                               n = 1000,
                                               exposure_name = "insured",
@@ -726,58 +699,134 @@ run_simulation_study_iv_mediation <- function(n_sims = 100,
     fixed_covariates <- initial_data$fixed_covariates
   }
   
-  results_list <- vector("list",n_sims)
+  results_list <- vector("list", n_sims)
   
-  pb <- txtProgressBar(min = 0,max = n_sims,style = 3)
+  pb <- txtProgressBar(min = 0, max = n_sims, style = 3)
   
   for (i in 1:n_sims) {
-    results_list[[i]] <- run_single_simulation_iv_mediation(
-      n = n,
-      exposure_name = exposure_name,
-      mediator_name = mediator_name,
-      iv_name = iv_name,
-      iv_strength = iv_strength,
-      trunc_level = trunc_level,
-      fixed_covariates = fixed_covariates
-    )
-    setTxtProgressBar(pb,i)
+    results_list[[i]] <- run_single_simulation_iv_mediation(n = n,
+                                                            exposure_name = exposure_name,
+                                                            mediator_name = mediator_name,
+                                                            iv_name = iv_name,
+                                                            iv_strength = iv_strength,
+                                                            trunc_level = trunc_level,
+                                                            fixed_covariates = fixed_covariates)
+    setTxtProgressBar(pb, i)
   }
   
   close(pb)
   
-  results_df <- do.call(rbind,results_list)
+  results_df <- do.call(rbind, results_list)
   
-  # summary statistics
-  summary_stats <- data.frame(n = n,
-                              n_sims = n_sims,
-                              iv_strength = iv_strength,
-                              n_converged_nie = sum(results_df$nie_converged,na.rm = TRUE),
-                              nie_mean = mean(results_df$nie_adl,na.rm = TRUE),
-                              nie_true = mean(results_df$true_nie_adl,na.rm = TRUE),
-                              nde_true = mean(results_df$true_nde_adl,na.rm = TRUE),
-                              te_true = mean(results_df$true_te_adl,na.rm = TRUE),
-                              nie_bias = mean(results_df$nie_bias,na.rm = TRUE),
-                              nie_empirical_se = sd(results_df$nie_adl,na.rm = TRUE),
-                              nie_mean_se = mean(results_df$nie_se_adl,na.rm = TRUE),
-                              nie_coverage = mean(results_df$nie_covers,na.rm = TRUE),
-                              nie_rmse = sqrt(mean(results_df$nie_bias^2,na.rm = TRUE)),
-                              mean_reduced_form = mean(results_df$nie_reduced,na.rm = TRUE),
-                              empirical_se_reduced_form = sd(results_df$nie_reduced,na.rm = TRUE),
-                              mean_se_reduced_form = mean(results_df$nie_reduced_se,na.rm = TRUE),
-                              mean_first_stage = mean(results_df$first_stage_est,na.rm = TRUE),
-                              empirical_se_first_stage = sd(results_df$first_stage_est,na.rm = TRUE),
-                              mean_se_first_stage = mean(results_df$first_stage_se,na.rm = TRUE),
-                              mean_true_iv_ame = mean(results_df$true_iv_ame_on_mediator,na.rm = TRUE),
-                              mean_prop_exposure = mean(results_df$prop_insured,na.rm = TRUE),
-                              mean_prop_mediator = mean(results_df$prop_rehabIRF,na.rm = TRUE),
-                              mean_prop_iv = mean(results_df$prop_IV,na.rm = TRUE))
+  return(results_df)
+}
+
+# summarize IV-mediation simulation results
+summarize_simulation_iv_mediation <- function(results_df) {
   
-  return(list(results = results_df,summary = summary_stats))
+  # NIE summary statistics
+  nie_summary <- list(mean_estimate = mean(results_df$nie_adl, na.rm = TRUE),
+                      mean_bias = mean(results_df$nie_bias, na.rm = TRUE),
+                      mean_se = mean(results_df$nie_se_adl, na.rm = TRUE),
+                      empirical_se = sd(results_df$nie_adl, na.rm = TRUE),
+                      coverage = mean(results_df$nie_covers, na.rm = TRUE),
+                      rmse = sqrt(mean(results_df$nie_bias^2, na.rm = TRUE)),
+                      convergence_rate = sum(results_df$nie_converged, na.rm = TRUE) / nrow(results_df))
+  
+  # reduced form (numerator) summary
+  reduced_form_summary <- list(mean_estimate = mean(results_df$nie_reduced, na.rm = TRUE),
+                               mean_se = mean(results_df$nie_reduced_se, na.rm = TRUE),
+                               empirical_se = sd(results_df$nie_reduced, na.rm = TRUE))
+  
+  # first stage (denominator) summary
+  first_stage_summary <- list(mean_estimate = mean(results_df$first_stage_est, na.rm = TRUE),
+                              mean_se = mean(results_df$first_stage_se, na.rm = TRUE),
+                              empirical_se = sd(results_df$first_stage_est, na.rm = TRUE))
+  
+  # IV diagnostics
+  iv_diagnostics <- list(iv_strength_setting = results_df$iv_strength[1],
+                         mean_prop_IV1 = mean(results_df$prop_IV, na.rm = TRUE),
+                         mean_prop_exposure = mean(results_df$prop_insured, na.rm = TRUE),
+                         mean_prop_mediator = mean(results_df$prop_rehabIRF, na.rm = TRUE),
+                         mean_true_iv_ame = mean(results_df$true_iv_ame_on_mediator, na.rm = TRUE))
+  
+  # true values (should be constant across simulations)
+  true_values <- list(true_nie = mean(results_df$true_nie_adl, na.rm = TRUE),
+                      true_nde = mean(results_df$true_nde_adl, na.rm = TRUE),
+                      true_te = mean(results_df$true_te_adl, na.rm = TRUE),
+                      prop_mediated = mean(results_df$true_nie_adl, na.rm = TRUE) / 
+                        mean(results_df$true_te_adl, na.rm = TRUE))
+  
+  summary_stats <- list(NIE = nie_summary,
+                        Reduced_Form = reduced_form_summary,
+                        First_Stage = first_stage_summary,
+                        IV_diagnostics = iv_diagnostics,
+                        true_values = true_values,
+                        n_simulations = nrow(results_df),
+                        n = results_df$n[1])
+  
+  return(summary_stats)
+}
+
+
+# print formatted summary of IV-mediation simulation results
+print_simulation_summary_iv_mediation <- function(summary_stats) {
+  
+  cat("\n")
+  cat("IV-MEDIATION SIMULATION RESULTS\n")
+  cat("===============================\n")
+  cat(sprintf("N simulations: %d | Sample size: %d | IV strength: %.2f\n",
+              summary_stats$n_simulations,
+              summary_stats$n,
+              summary_stats$IV_diagnostics$iv_strength_setting))
+  cat(sprintf("P(IV=1): %.3f | P(Exposure=1): %.3f | P(Mediator=1): %.3f\n",
+              summary_stats$IV_diagnostics$mean_prop_IV1,
+              summary_stats$IV_diagnostics$mean_prop_exposure,
+              summary_stats$IV_diagnostics$mean_prop_mediator))
+  cat(sprintf("Mean IV effect on Mediator: %.4f\n\n",
+              summary_stats$IV_diagnostics$mean_true_iv_ame))
+  
+  cat("TRUE CAUSAL EFFECTS\n")
+  cat("-------------------\n")
+  cat(sprintf("True NIE:            %.4f\n", summary_stats$true_values$true_nie))
+  cat(sprintf("True NDE:            %.4f\n", summary_stats$true_values$true_nde))
+  cat(sprintf("True TE:             %.4f\n", summary_stats$true_values$true_te))
+  cat(sprintf("Proportion Mediated: %.3f\n\n", summary_stats$true_values$prop_mediated))
+  
+  cat("ESTIMATION RESULTS\n")
+  cat("------------------\n")
+  cat("Component        Est      Bias     Model_SE Emp_SE   \n")
+  cat("---------------- -------  -------  -------- -------- \n")
+  
+  # Reduced Form (Numerator)
+  cat(sprintf("Reduced Form     %.4f   N/A      %.4f   %.4f\n",
+              summary_stats$Reduced_Form$mean_estimate,
+              summary_stats$Reduced_Form$mean_se,
+              summary_stats$Reduced_Form$empirical_se))
+  
+  # First Stage (Denominator)
+  cat(sprintf("First Stage      %.4f   N/A      %.4f   %.4f\n",
+              summary_stats$First_Stage$mean_estimate,
+              summary_stats$First_Stage$mean_se,
+              summary_stats$First_Stage$empirical_se))
+  
+  cat("\n")
+  cat("Effect    Est      Bias     Model_SE Emp_SE   Coverage Conv_Rate\n")
+  cat("--------  -------  -------  -------- -------  -------- ---------\n")
+  
+  # NIE results
+  cat(sprintf("NIE       %.4f   %.4f   %.4f   %.4f   %.3f    %.3f\n",
+              summary_stats$NIE$mean_estimate,
+              summary_stats$NIE$mean_bias,
+              summary_stats$NIE$mean_se,
+              summary_stats$NIE$empirical_se,
+              summary_stats$NIE$coverage,
+              summary_stats$NIE$convergence_rate))
 }
 
 
 # number of sims
-N_SIMS <- 1500
+N_SIMS <- 250
 
 ### use weak instrument
 # N=1000
@@ -786,39 +835,9 @@ sim_study <- run_simulation_study_iv_mediation(n_sims = N_SIMS,
                                                iv_strength = 0.15,
                                                use_fixed_covariates = TRUE)
 
-
 # display results
-cat("\n=== IV-Mediation Performance Summary ===\n")
-
-cat("\nData Characteristics:\n")
-cat("  Mean P(Exposure=1):   ",round(sim_study$summary$mean_prop_exposure,3),"\n")
-cat("  Mean P(Mediator=1):   ",round(sim_study$summary$mean_prop_mediator,3),"\n")
-cat("  Mean P(Instrument=1): ",round(sim_study$summary$mean_prop_iv,3),"\n")
-
-cat("\nTrue Causal Effects:\n")
-cat("  True NIE:             ",round(sim_study$summary$nie_true,4),"\n")
-cat("  True NDE:             ",round(sim_study$summary$nde_true,4),"\n")
-cat("  True TE:              ",round(sim_study$summary$te_true,4),"\n")
-cat("  Proportion Mediated:  ",round(sim_study$summary$nie_true / sim_study$summary$te_true,4),"\n")
-
-cat("\nReduced Form (Numerator):\n")
-cat("  Mean estimate:        ",round(sim_study$summary$mean_reduced_form,4),"\n")
-cat("  Empirical SE:         ",round(sim_study$summary$empirical_se_reduced_form,4),"\n")
-cat("  Mean estimated SE:    ",round(sim_study$summary$mean_se_reduced_form,4),"\n")
-
-cat("\nFirst Stage (Denominator):\n")
-cat("  Mean estimate:        ",round(sim_study$summary$mean_first_stage,4),"\n")
-cat("  Empirical SE:         ",round(sim_study$summary$empirical_se_first_stage,4),"\n")
-cat("  Mean estimated SE:    ",round(sim_study$summary$mean_se_first_stage,4),"\n")
-
-cat("\nNatural Indirect Effect (NIE) - IV Approach:\n")
-cat("  True NIE:             ",round(sim_study$summary$nie_true,4),"\n")
-cat("  Mean estimate:        ",round(sim_study$summary$nie_mean,4),"\n")
-cat("  Bias:                 ",round(sim_study$summary$nie_bias,4),"\n")
-cat("  Empirical SE:         ",round(sim_study$summary$nie_empirical_se,4),"\n")
-cat("  Mean estimated SE:    ",round(sim_study$summary$nie_mean_se,4),"\n")
-cat("  Coverage:             ",round(sim_study$summary$nie_coverage,3),"\n")
-cat("  Convergence rate:     ",round(sim_study$summary$n_converged_nie / sim_study$summary$n_sims,3),"\n")
+sim_summary <- summarize_simulation_iv_mediation(sim_study)
+print_simulation_summary_iv_mediation(sim_summary)
 
 
 
@@ -829,41 +848,9 @@ sim_study <- run_simulation_study_iv_mediation(n_sims = N_SIMS,
                                                iv_strength = 0.05,
                                                use_fixed_covariates = FALSE)
 
-print(sim_study$summary)
-
 # display results
-cat("\n=== IV-Mediation Performance Summary ===\n")
-
-cat("\nData Characteristics:\n")
-cat("  Mean P(Exposure=1):   ",round(sim_study$summary$mean_prop_exposure,3),"\n")
-cat("  Mean P(Mediator=1):   ",round(sim_study$summary$mean_prop_mediator,3),"\n")
-cat("  Mean P(Instrument=1): ",round(sim_study$summary$mean_prop_iv,3),"\n")
-
-cat("\nTrue Causal Effects:\n")
-cat("  True NIE:             ",round(sim_study$summary$nie_true,4),"\n")
-cat("  True NDE:             ",round(sim_study$summary$nde_true,4),"\n")
-cat("  True TE:              ",round(sim_study$summary$te_true,4),"\n")
-cat("  Proportion Mediated:  ",round(sim_study$summary$nie_true / sim_study$summary$te_true,4),"\n")
-
-cat("\nReduced Form (Numerator):\n")
-cat("  Mean estimate:        ",round(sim_study$summary$mean_reduced_form,4),"\n")
-cat("  Empirical SE:         ",round(sim_study$summary$empirical_se_reduced_form,4),"\n")
-cat("  Mean estimated SE:    ",round(sim_study$summary$mean_se_reduced_form,4),"\n")
-
-cat("\nFirst Stage (Denominator):\n")
-cat("  Mean estimate:        ",round(sim_study$summary$mean_first_stage,4),"\n")
-cat("  Empirical SE:         ",round(sim_study$summary$empirical_se_first_stage,4),"\n")
-cat("  Mean estimated SE:    ",round(sim_study$summary$mean_se_first_stage,4),"\n")
-
-cat("\nNatural Indirect Effect (NIE) - IV Approach:\n")
-cat("  True NIE:             ",round(sim_study$summary$nie_true,4),"\n")
-cat("  Mean estimate:        ",round(sim_study$summary$nie_mean,4),"\n")
-cat("  Bias:                 ",round(sim_study$summary$nie_bias,4),"\n")
-cat("  Empirical SE:         ",round(sim_study$summary$nie_empirical_se,4),"\n")
-cat("  Mean estimated SE:    ",round(sim_study$summary$nie_mean_se,4),"\n")
-cat("  Coverage:             ",round(sim_study$summary$nie_coverage,3),"\n")
-cat("  Convergence rate:     ",round(sim_study$summary$n_converged_nie / sim_study$summary$n_sims,3),"\n")
-
+sim_summary <- summarize_simulation_iv_mediation(sim_study)
+print_simulation_summary_iv_mediation(sim_summary)
 
 
 
@@ -877,39 +864,10 @@ sim_study <- run_simulation_study_iv_mediation(n_sims = N_SIMS,
                                                iv_strength = 0.5,
                                                use_fixed_covariates = TRUE)
 
-
 # display results
-cat("\n=== IV-Mediation Performance Summary ===\n")
+sim_summary <- summarize_simulation_iv_mediation(sim_study)
+print_simulation_summary_iv_mediation(sim_summary)
 
-cat("\nData Characteristics:\n")
-cat("  Mean P(Exposure=1):   ",round(sim_study$summary$mean_prop_exposure,3),"\n")
-cat("  Mean P(Mediator=1):   ",round(sim_study$summary$mean_prop_mediator,3),"\n")
-cat("  Mean P(Instrument=1): ",round(sim_study$summary$mean_prop_iv,3),"\n")
-
-cat("\nTrue Causal Effects:\n")
-cat("  True NIE:             ",round(sim_study$summary$nie_true,4),"\n")
-cat("  True NDE:             ",round(sim_study$summary$nde_true,4),"\n")
-cat("  True TE:              ",round(sim_study$summary$te_true,4),"\n")
-cat("  Proportion Mediated:  ",round(sim_study$summary$nie_true / sim_study$summary$te_true,4),"\n")
-
-cat("\nReduced Form (Numerator):\n")
-cat("  Mean estimate:        ",round(sim_study$summary$mean_reduced_form,4),"\n")
-cat("  Empirical SE:         ",round(sim_study$summary$empirical_se_reduced_form,4),"\n")
-cat("  Mean estimated SE:    ",round(sim_study$summary$mean_se_reduced_form,4),"\n")
-
-cat("\nFirst Stage (Denominator):\n")
-cat("  Mean estimate:        ",round(sim_study$summary$mean_first_stage,4),"\n")
-cat("  Empirical SE:         ",round(sim_study$summary$empirical_se_first_stage,4),"\n")
-cat("  Mean estimated SE:    ",round(sim_study$summary$mean_se_first_stage,4),"\n")
-
-cat("\nNatural Indirect Effect (NIE) - IV Approach:\n")
-cat("  True NIE:             ",round(sim_study$summary$nie_true,4),"\n")
-cat("  Mean estimate:        ",round(sim_study$summary$nie_mean,4),"\n")
-cat("  Bias:                 ",round(sim_study$summary$nie_bias,4),"\n")
-cat("  Empirical SE:         ",round(sim_study$summary$nie_empirical_se,4),"\n")
-cat("  Mean estimated SE:    ",round(sim_study$summary$nie_mean_se,4),"\n")
-cat("  Coverage:             ",round(sim_study$summary$nie_coverage,3),"\n")
-cat("  Convergence rate:     ",round(sim_study$summary$n_converged_nie / sim_study$summary$n_sims,3),"\n")
 
 
 
@@ -920,40 +878,10 @@ sim_study <- run_simulation_study_iv_mediation(n_sims = N_SIMS,
                                                iv_strength = 0.45,
                                                use_fixed_covariates = FALSE)
 
-print(sim_study$summary)
-
 # display results
-cat("\n=== IV-Mediation Performance Summary ===\n")
+sim_summary <- summarize_simulation_iv_mediation(sim_study)
+print_simulation_summary_iv_mediation(sim_summary)
 
-cat("\nData Characteristics:\n")
-cat("  Mean P(Exposure=1):   ",round(sim_study$summary$mean_prop_exposure,3),"\n")
-cat("  Mean P(Mediator=1):   ",round(sim_study$summary$mean_prop_mediator,3),"\n")
-cat("  Mean P(Instrument=1): ",round(sim_study$summary$mean_prop_iv,3),"\n")
-
-cat("\nTrue Causal Effects:\n")
-cat("  True NIE:             ",round(sim_study$summary$nie_true,4),"\n")
-cat("  True NDE:             ",round(sim_study$summary$nde_true,4),"\n")
-cat("  True TE:              ",round(sim_study$summary$te_true,4),"\n")
-cat("  Proportion Mediated:  ",round(sim_study$summary$nie_true / sim_study$summary$te_true,4),"\n")
-
-cat("\nReduced Form (Numerator):\n")
-cat("  Mean estimate:        ",round(sim_study$summary$mean_reduced_form,4),"\n")
-cat("  Empirical SE:         ",round(sim_study$summary$empirical_se_reduced_form,4),"\n")
-cat("  Mean estimated SE:    ",round(sim_study$summary$mean_se_reduced_form,4),"\n")
-
-cat("\nFirst Stage (Denominator):\n")
-cat("  Mean estimate:        ",round(sim_study$summary$mean_first_stage,4),"\n")
-cat("  Empirical SE:         ",round(sim_study$summary$empirical_se_first_stage,4),"\n")
-cat("  Mean estimated SE:    ",round(sim_study$summary$mean_se_first_stage,4),"\n")
-
-cat("\nNatural Indirect Effect (NIE) - IV Approach:\n")
-cat("  True NIE:             ",round(sim_study$summary$nie_true,4),"\n")
-cat("  Mean estimate:        ",round(sim_study$summary$nie_mean,4),"\n")
-cat("  Bias:                 ",round(sim_study$summary$nie_bias,4),"\n")
-cat("  Empirical SE:         ",round(sim_study$summary$nie_empirical_se,4),"\n")
-cat("  Mean estimated SE:    ",round(sim_study$summary$nie_mean_se,4),"\n")
-cat("  Coverage:             ",round(sim_study$summary$nie_coverage,3),"\n")
-cat("  Convergence rate:     ",round(sim_study$summary$n_converged_nie / sim_study$summary$n_sims,3),"\n")
 
 
 
