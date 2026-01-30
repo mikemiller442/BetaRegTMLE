@@ -11,61 +11,208 @@
 library(betareg)
 
 
+# Helper functions for extracting model information
+extract_formula <- function(mod) {
+  if (inherits(mod,"betareg")) {
+    return(formula(mod))
+  } else {
+    return(formula(mod))
+  }
+}
+
+extract_model_type <- function(mod) {
+  if (inherits(mod,"betareg")) {
+    return("beta")
+  } else {
+    return("glm")
+  }
+}
+
+extract_family <- function(mod) {
+  if (inherits(mod,"betareg")) {
+    return(NULL)
+  } else {
+    return(family(mod))
+  }
+}
+
+
+# Calculate cross-fitted model predictions
+crossfit_predict <- function(formula,data,model_type = "glm",
+                             family = binomial(),newdata_list = NULL,
+                             folds,predict_type = "response") {
+  
+  n_folds <- max(folds)
+  
+  # if newdata_list is NULL, just predict on original data
+  if (is.null(newdata_list)) {
+    newdata_list <- list(original = data)
+  }
+  
+  # initialize output list
+  n_scenarios <- length(newdata_list)
+  predictions_list <- vector("list",n_scenarios)
+  names(predictions_list) <- names(newdata_list)
+  
+  # initialize prediction vectors for each scenario
+  for (i in 1:n_scenarios) {
+    predictions_list[[i]] <- numeric(nrow(newdata_list[[i]]))
+  }
+  
+  # get fold assignments for prediction data
+  pred_folds <- if ("fold" %in% names(newdata_list[[1]])) {
+    newdata_list[[1]]$fold
+  } else {
+    folds
+  }
+  
+  # loop through each fold
+  for (k in 1:n_folds) {
+    # training data: all folds except k
+    train_idx <- which(folds != k)
+    train_data <- data[train_idx,]
+    
+    # test indices for prediction
+    test_idx <- which(pred_folds == k)
+    
+    if (length(test_idx) == 0) next
+    
+    # fit model once on training data
+    if (model_type == "glm") {
+      fit <- glm(formula,data = train_data,family = family)
+    } else if (model_type == "beta") {
+      fit <- betareg::betareg(formula,data = train_data)
+    } else {
+      stop("Unsupported model_type. Use 'glm' or 'beta'.")
+    }
+    
+    # use the fitted model to predict on all scenarios
+    for (i in 1:n_scenarios) {
+      test_data <- newdata_list[[i]][test_idx, , drop = FALSE]
+      predictions_list[[i]][test_idx] <- predict(fit,newdata = test_data,type = predict_type)
+    }
+  }
+  
+  # if only one scenario, return vector instead of list
+  if (n_scenarios == 1) {
+    return(predictions_list[[1]])
+  }
+  
+  return(predictions_list)
+}
+
+
 # Calculates a robust TMLE estimator for the ATE for a single outcome
 robustcompATE <- function(outcome_mod,ps_mod,covariates,
                           exposure_name,outcome_name,
-                          trunc_level,scale_factor = 1.0) {
+                          trunc_level,scale_factor = 1.0,
+                          crossFit = FALSE,n_folds = 5,folds = NULL) {
+  
+  n <- nrow(covariates)
+  exposure <- covariates[[exposure_name]]
+  Y <- covariates[[outcome_name]]
+  
+  # create fold assignments if using cross-fitting
+  if (crossFit) {
+    # use provided folds or create new ones
+    if (is.null(folds)) {
+      folds <- sample(rep(1:n_folds,length.out = n))
+    }
+    covariates$fold <- folds
+    
+    # extract formulas and model information from fitted models
+    ps_formula <- extract_formula(ps_mod)
+    outcome_formula <- extract_formula(outcome_mod)
+    
+    ps_type <- extract_model_type(ps_mod)
+    outcome_type <- extract_model_type(outcome_mod)
+    
+    ps_family <- extract_family(ps_mod)
+    outcome_family <- extract_family(outcome_mod)
+  }
+  
+  ### calculate propensity score P(A=1|W)
+  if (crossFit) {
+    ps_pred <- crossfit_predict(formula = ps_formula,
+                                data = covariates,
+                                model_type = ps_type,
+                                family = ps_family,
+                                newdata_list = list(original = covariates),
+                                folds = folds,
+                                predict_type = "response")
+  } else {
+    ps_pred <- predict(ps_mod,newdata = covariates,type = "response")
+  }
+  ps_trunc <- pmax(pmin(ps_pred,1.0 - trunc_level),trunc_level)
   
   ### calculate clever covariates for TMLE
-  ps_pred <- predict(ps_mod,newdata = covariates,type = "response")
-  ps_trunc <- pmax(pmin(ps_pred,1.0 - trunc_level),trunc_level)
-  exposure <- covariates[[exposure_name]]
-  trunc_weights_0 <- ifelse(exposure == 0,-1.0 / (1.0 - ps_trunc),0)
-  trunc_weights_1 <- ifelse(exposure == 1,1.0 / ps_trunc,0)
-  H_0_Y <- -1.0 * trunc_weights_0
-  H_1_Y <- trunc_weights_1
-  H_A_Y <- ifelse(exposure == 1,H_1_Y,H_0_Y)
+  # Observed clever covariate (depends on actual treatment received)
+  H_A_Y <- ifelse(exposure == 1,
+                  1.0 / ps_trunc,
+                  -1.0 / (1.0 - ps_trunc))
+  
+  # Counterfactual clever covariates (for all observations)
+  H_0_cf <- -1.0 / (1.0 - ps_trunc)
+  H_1_cf <- 1.0 / ps_trunc
+  
+  ### get outcome predictions
+  covariates_0 <- covariates
+  covariates_0[[exposure_name]] <- 0
+  
+  covariates_1 <- covariates
+  covariates_1[[exposure_name]] <- 1
+  
+  if (crossFit) {
+    outcome_preds <- crossfit_predict(formula = outcome_formula,
+                                      data = covariates,
+                                      model_type = outcome_type,
+                                      family = outcome_family,
+                                      newdata_list = list(original = covariates,
+                                                          a0 = covariates_0,
+                                                          a1 = covariates_1),
+                                      folds = folds,
+                                      predict_type = "response")
+    pred_y_A <- outcome_preds$original
+    pred_y_0 <- outcome_preds$a0
+    pred_y_1 <- outcome_preds$a1
+  } else {
+    pred_y_A <- predict(outcome_mod,newdata = covariates,type = "response")
+    pred_y_0 <- predict(outcome_mod,newdata = covariates_0,type = "response")
+    pred_y_1 <- predict(outcome_mod,newdata = covariates_1,type = "response")
+  }
   
   ### estimate fluctuation parameter
-  pred_y <- predict(outcome_mod,newdata = covariates,type = "response")
-  outcome_values <- covariates[[outcome_name]]
-  data_tmle <- data.frame(Y = outcome_values,
-                          pred_vals = pred_y,
+  data_tmle <- data.frame(Y = Y,
+                          pred_vals = pred_y_A,
                           H_A_Y = H_A_Y)
   eps <- coef(glm(Y ~ -1 + offset(qlogis(pred_vals)) + H_A_Y,
                   data = data_tmle,family = "binomial"))
   
   ### update predictions using fluctuation parameter
-  pred_y_A <- predict(outcome_mod,covariates,type = "response")
-  covariates_0 <- covariates
-  covariates_0[[exposure_name]] <- 0
-  covariates_1 <- covariates
-  covariates_1[[exposure_name]] <- 1
-  pred_y_0 <- predict(outcome_mod,covariates_0,type = "response")
-  pred_y_1 <- predict(outcome_mod,covariates_1,type = "response")
+  # Use counterfactual clever covariates for counterfactual predictions
   pred_star_y_A <- plogis(qlogis(pred_y_A) + eps * H_A_Y)
-  pred_star_y_0 <- plogis(qlogis(pred_y_0) + eps * H_0_Y)
-  pred_star_y_1 <- plogis(qlogis(pred_y_1) + eps * H_1_Y)
+  pred_star_y_0 <- plogis(qlogis(pred_y_0) + eps * H_0_cf)
+  pred_star_y_1 <- plogis(qlogis(pred_y_1) + eps * H_1_cf)
   
-  ### calculate ATE using targeted estimates
-  ate_star <- pred_star_y_1 - pred_star_y_0
-  ate_star_scaled <- ate_star * scale_factor
+  ### calculate ATE using targeted estimates (on original scale)
+  ate_star_unscaled <- pred_star_y_1 - pred_star_y_0
+  ate_est_unscaled <- mean(ate_star_unscaled)
+  ate_star_scaled <- ate_star_unscaled * scale_factor
+  ate_est_scaled <- ate_est_unscaled * scale_factor
   
-  ### calculate scaled efficient influence function
-  D_Y <- H_A_Y * (outcome_values - pred_star_y_A)
-  D_W <- ate_star - mean(ate_star)
+  ### calculate efficient influence function
+  D_Y <- H_A_Y * (Y - pred_star_y_A)
+  D_W <- ate_star_unscaled - ate_est_unscaled
   EIF <- (D_Y + D_W) * scale_factor
   
   ### calculate standard errors and confidence intervals
-  n <- length(EIF)
   var_ate <- var(EIF) / n
   se_ate <- sqrt(var_ate)
-  ate_mean <- mean(ate_star_scaled)
-  ci_lower <- ate_mean - qnorm(0.975) * se_ate
-  ci_upper <- ate_mean + qnorm(0.975) * se_ate
+  ci_lower <- ate_est_scaled - qnorm(0.975) * se_ate
+  ci_upper <- ate_est_scaled + qnorm(0.975) * se_ate
   
   ### return results
-  return(list(ATE = ate_mean,
+  return(list(ATE = ate_est_scaled,
               ITE = ate_star_scaled,
               IF = EIF,
               SE = se_ate,
@@ -77,7 +224,7 @@ robustcompATE <- function(outcome_mod,ps_mod,covariates,
 robustcompATT <- function(outcome_mod,ps_mod,covariates,
                           exposure_name,outcome_name,
                           scale_factor = 1.0,trunc_level = 0.05,
-                          max_iter = 100,tol = 1e-15) {
+                          max_iter = 100,tol = 1e-14) {
   
   ### calculate propensity scores and outcome predictions
   A <- covariates[[exposure_name]]
@@ -157,32 +304,47 @@ robustcompATE_MAR <- function(outcome_mod,ps_mod,missing_mod,
   n <- nrow(covariates_full)
   exposure <- covariates_full[[exposure_name]]
   
-  ### calculate propensity score for exposure (instrument)
+  ### calculate propensity score for exposure
   ps_pred <- predict(ps_mod,newdata = covariates_full,type = "response")
   ps_trunc <- pmax(pmin(ps_pred,1.0 - trunc_level),trunc_level)
   
-  ### calculate probability of being observed (A=1)
+  ### calculate probability of being observed
   prob_observed <- predict(missing_mod,newdata = covariates_full,type = "response")
   prob_observed_trunc <- pmax(pmin(prob_observed,1.0 - trunc_level),trunc_level)
   
-  ### calculate clever covariates for TMLE
-  trunc_weights_0 <- ifelse(exposure == 0 & outcome_observed == 1,
-                            -1.0 / ((1.0 - ps_trunc) * prob_observed_trunc),0)
-  trunc_weights_1 <- ifelse(exposure == 1 & outcome_observed == 1,
-                            1.0 / (ps_trunc * prob_observed_trunc),0)
-  H_0_Y <- -1.0 * ifelse(outcome_observed == 1,1 / ((1.0 - ps_trunc) * prob_observed_trunc),0)
-  H_1_Y <- ifelse(outcome_observed == 1,1 / (ps_trunc * prob_observed_trunc),0)
+  ### calculate observed data clever covariates for TMLE
+  H_0_Y <- ifelse(exposure == 0 & outcome_observed == 1,
+                  -1.0 / ((1.0 - ps_trunc) * prob_observed_trunc),
+                  0)
+  H_1_Y <- ifelse(exposure == 1 & outcome_observed == 1,
+                  1.0 / (ps_trunc * prob_observed_trunc),
+                  0)
   H_A_Y <- ifelse(exposure == 1,H_1_Y,H_0_Y)
   
   ### estimate fluctuation parameter using observed data only
   pred_y <- predict(outcome_mod,newdata = covariates_full,type = "response")
   obs_idx <- which(outcome_observed == 1)
-  
   data_tmle <- data.frame(Y = outcome_values[obs_idx],
                           pred_vals = pred_y[obs_idx],
                           H_A_Y = H_A_Y[obs_idx])
   eps <- coef(glm(Y ~ -1 + offset(qlogis(pred_vals)) + H_A_Y,
                   data = data_tmle,family = "binomial"))
+  
+  ### counterfactual clever covariates for all observations
+  # need to compute probability of observation at COUNTERFACTUAL exposure levels
+  covariates_0 <- covariates_full
+  covariates_0[[exposure_name]] <- 0
+  covariates_1 <- covariates_full
+  covariates_1[[exposure_name]] <- 1
+  
+  prob_observed_a0 <- predict(missing_mod,newdata = covariates_0,type = "response")
+  prob_observed_a0_trunc <- pmax(pmin(prob_observed_a0,1.0 - trunc_level),trunc_level)
+  
+  prob_observed_a1 <- predict(missing_mod,newdata = covariates_1,type = "response")
+  prob_observed_a1_trunc <- pmax(pmin(prob_observed_a1,1.0 - trunc_level),trunc_level)
+  
+  H_0_cf <- -1.0 / ((1.0 - ps_trunc) * prob_observed_a0_trunc)
+  H_1_cf <- 1.0 / (ps_trunc * prob_observed_a1_trunc)
   
   ### update predictions using fluctuation parameter
   covariates_0 <- covariates_full
@@ -194,9 +356,11 @@ robustcompATE_MAR <- function(outcome_mod,ps_mod,missing_mod,
   pred_y_1 <- predict(outcome_mod,newdata = covariates_1,type = "response")
   pred_y_A <- predict(outcome_mod,newdata = covariates_full,type = "response")
   
+  # use observed-data clever covariate for pred_star_y_A in first EIF component
   pred_star_y_A <- plogis(qlogis(pred_y_A) + eps * H_A_Y)
-  pred_star_y_0 <- plogis(qlogis(pred_y_0) + eps * H_0_Y)
-  pred_star_y_1 <- plogis(qlogis(pred_y_1) + eps * H_1_Y)
+  # use counterfactual clever covariates for plug-in estimator
+  pred_star_y_0 <- plogis(qlogis(pred_y_0) + eps * H_0_cf)
+  pred_star_y_1 <- plogis(qlogis(pred_y_1) + eps * H_1_cf)
   
   ### calculate ATE using targeted estimates
   ate_star <- pred_star_y_1 - pred_star_y_0
@@ -231,7 +395,7 @@ robustcompATT_MAR <- function(outcome_mod,ps_mod,missing_mod,
                               outcome_observed,outcome_values,
                               outcome_name,trunc_level = 0.05,
                               scale_factor = 1.0,
-                              max_iter = 100,tol = 1e-15) {
+                              max_iter = 100,tol = 1e-14) {
   
   ### calculate propensity scores and outcome predictions
   A <- covariates_full[[exposure_name]]
@@ -264,7 +428,6 @@ robustcompATT_MAR <- function(outcome_mod,ps_mod,missing_mod,
     H_0_Y <- -1.0 * (pred_ps * trunc_weights_missing_0) / (P_A1 * (1.0 - pred_ps))
     H_1_Y <- trunc_weights_missing_1 / P_A1
     H_A_Y <- ifelse(A == 1,H_1_Y,H_0_Y)
-    H_A_Y_observed <- H_A_Y * outcome_observed
     obs_indices <- which(outcome_observed == 1)
     data_tmle_y <- data.frame(Y = outcome_values[obs_indices],
                               pred_vals = pred_y_A[obs_indices],
@@ -481,9 +644,10 @@ run_single_simulation <- function(n = 1000,
                                   trunc_level = 0.05,
                                   missing_outcome = FALSE,
                                   prob_observed_baseline = 0.8,
-                                  fixed_covariates = NULL) {
+                                  crossFit = FALSE,
+                                  n_folds = 5) {
   
-  # generate data (using fixed covariates if provided)
+  # expects fixed_covariates to exist in parent environment
   sim_data <- generate_stroke_data(n = n,
                                    exposure_name = exposure_name,
                                    missing_outcome = missing_outcome,
@@ -502,25 +666,23 @@ run_single_simulation <- function(n = 1000,
   N_adl <- nrow(data)
   data$OUT3_ADL_IADL_01 <- (data$OUT3_ADL_IADL_01 * (N_adl - 1) + 0.5) / N_adl
   
-  ### estimate propensity score model
-  # create formula dynamically
-  ps_formula <- as.formula(paste(exposure_name,
-                                 "~ age + post_discharge_disability + stroke_severity + comorbidity"))
-  ps_model <- glm(ps_formula,data = data,family = binomial())
+  ### estimate propensity score model (hardcoded formula)
+  ps_model <- glm(rehabIRF ~ age + post_discharge_disability + stroke_severity + comorbidity,
+                  data = data,family = binomial())
   
   if (missing_outcome) {
-    # missing data model
-    missing_formula <- as.formula(paste("observed_adl ~",exposure_name,
-                                        "+ age + post_discharge_disability + stroke_severity + comorbidity"))
-    missing_model_adl <- glm(missing_formula,data = data,family = binomial())
+    # missing data model (hardcoded formula)
+    missing_model_adl <- glm(observed_adl ~ rehabIRF + age + post_discharge_disability + 
+                               stroke_severity + comorbidity,
+                             data = data,family = binomial())
     
     ### estimate outcome models on observed data only
     data_obs_adl <- data[observed_adl == 1,]
     
-    # outcome model (includes interaction term to match data generating mechanism)
-    outcome_formula <- as.formula(paste("OUT3_ADL_IADL_01 ~ age +",exposure_name,
-                                        "* post_discharge_disability + stroke_severity + comorbidity"))
-    adl_mod <- betareg(outcome_formula,data = data_obs_adl)
+    # outcome model (hardcoded formula with interaction term to match DGM)
+    adl_mod <- betareg(OUT3_ADL_IADL_01 ~ age + rehabIRF * post_discharge_disability + 
+                         stroke_severity + comorbidity,
+                       data = data_obs_adl)
     
     ### apply TMLE for ATE with missing outcomes
     results_ate <- robustcompATE_MAR(outcome_mod = adl_mod,
@@ -546,13 +708,13 @@ run_single_simulation <- function(n = 1000,
                                      trunc_level = trunc_level,
                                      scale_factor = 3.0,
                                      max_iter = 100,
-                                     tol = 1e-15)
+                                     tol = 1e-14)
     
   } else {
-    # outcome model
-    outcome_formula <- as.formula(paste("OUT3_ADL_IADL_01 ~ age +",exposure_name,
-                                        "* post_discharge_disability + stroke_severity + comorbidity"))
-    adl_mod <- betareg(outcome_formula,data = data)
+    # outcome model (hardcoded formula with interaction term to match DGM)
+    adl_mod <- betareg(OUT3_ADL_IADL_01 ~ age + rehabIRF * post_discharge_disability + 
+                         stroke_severity + comorbidity,
+                       data = data)
     
     ### apply TMLE for ATE
     results_ate <- robustcompATE(outcome_mod = adl_mod,
@@ -561,7 +723,9 @@ run_single_simulation <- function(n = 1000,
                                  exposure_name = exposure_name,
                                  outcome_name = "OUT3_ADL_IADL_01",
                                  trunc_level = trunc_level,
-                                 scale_factor = 3.0)
+                                 scale_factor = 3.0,
+                                 crossFit = crossFit,
+                                 n_folds = n_folds)
     
     ### apply TMLE for ATT
     results_att <- robustcompATT(outcome_mod = adl_mod,
@@ -574,53 +738,66 @@ run_single_simulation <- function(n = 1000,
   }
   
   ### extract results
-  results_df <- data.frame(n = n,
-                           exposure_name = exposure_name,
-                           trunc_level = trunc_level,
-                           missing_outcome = missing_outcome,
-                           # ATE results
-                           ate_adl = results_ate$ATE,
-                           ate_se_adl = results_ate$SE,
-                           ate_ci_lower_adl = results_ate$CI["lower"],
-                           ate_ci_upper_adl = results_ate$CI["upper"],
-                           # ATT results
-                           att_adl = results_att$ATT,
-                           att_se_adl = results_att$SE,
-                           att_ci_lower_adl = results_att$CI["lower"],
-                           att_ci_upper_adl = results_att$CI["upper"],
-                           # true values
-                           true_ate_adl = sim_data$true_ate_adl,
-                           true_att_adl = sim_data$true_att_adl)
-  
-  return(results_df)
+  data.frame(n = n,
+             exposure_name = exposure_name,
+             trunc_level = trunc_level,
+             missing_outcome = missing_outcome,
+             crossFit = crossFit,
+             # ATE results
+             ate_adl = results_ate$ATE,
+             ate_se_adl = results_ate$SE,
+             ate_ci_lower_adl = results_ate$CI["lower"],
+             ate_ci_upper_adl = results_ate$CI["upper"],
+             # ATT results
+             att_adl = results_att$ATT,
+             att_se_adl = results_att$SE,
+             att_ci_lower_adl = results_att$CI["lower"],
+             att_ci_upper_adl = results_att$CI["upper"],
+             # true values
+             true_ate_adl = sim_data$true_ate_adl,
+             true_att_adl = sim_data$true_att_adl)
 }
 
 
 # Run full simulation study for both ATE and ATT
-run_simulation_study <- function(n_sims = 500,n = 1000,trunc_level = 0.05,
-                                 missing_outcome = FALSE,prob_observed_baseline = 0.8,
-                                 use_fixed_covariates = TRUE) {
+run_simulation_study <- function(n_sims = 500,
+                                 n = 1000,
+                                 exposure_name = "rehabIRF",
+                                 trunc_level = 0.05,
+                                 missing_outcome = FALSE,
+                                 prob_observed_baseline = 0.8,
+                                 crossFit = FALSE,
+                                 n_folds = 5) {
   
-  # if boolFixCovariates is TRUE, generate covariates once
-  fixed_covariates <- NULL
-  if (use_fixed_covariates) {
-    # set missing_outcome to be false here because we need to simulate covariates
-    initial_data <- generate_stroke_data(n = n,
-                                         missing_outcome = FALSE)
-    fixed_covariates <- initial_data$fixed_covariates
+  # generate fixed covariates once and assign to parent environment
+  initial_data <- generate_stroke_data(n = n,
+                                       exposure_name = exposure_name,
+                                       missing_outcome = FALSE)
+  # assign covariates to parent environment
+  # considerably faster than passing as an argument for each simulation
+  fixed_covariates <<- initial_data$fixed_covariates
+  
+  results_list <- vector("list",n_sims)
+  
+  pb <- txtProgressBar(min = 0,max = n_sims,style = 3)
+  
+  for (i in 1:n_sims) {
+    results_list[[i]] <- run_single_simulation(n = n,
+                                               exposure_name = exposure_name,
+                                               trunc_level = trunc_level,
+                                               missing_outcome = missing_outcome,
+                                               prob_observed_baseline = prob_observed_baseline,
+                                               crossFit = crossFit,
+                                               n_folds = n_folds)
+    setTxtProgressBar(pb,i)
   }
   
-  # run simulations sequentially using same set of covariates
-  # each iteration will generate new treatment, outcomes, and censoring indicators
-  results_list <- lapply(1:n_sims,function(i) {
-    run_single_simulation(n = n,trunc_level = trunc_level,
-                          missing_outcome = missing_outcome,
-                          prob_observed_baseline = prob_observed_baseline,
-                          fixed_covariates = fixed_covariates)
-  })
+  close(pb)
   
-  # combine results
   results <- do.call(rbind,results_list)
+  
+  # clean up global variable
+  rm(fixed_covariates,envir = .GlobalEnv)
   
   # calculate simulation performance metrics for ATE
   results$ate_bias_adl <- results$ate_adl - results$true_ate_adl
@@ -635,11 +812,9 @@ run_simulation_study <- function(n_sims = 500,n = 1000,trunc_level = 0.05,
   return(results)
 }
 
+
 # Summarize simulation results for both ATE and ATT
 summarize_simulation <- function(results) {
-  
-  # check if missing outcomes scenario
-  missing_outcome <- results$missing_outcome[1]
   
   # ATE summary statistics
   ate_stats <- c(mean_estimate = mean(results$ate_adl),
@@ -666,7 +841,12 @@ summarize_simulation <- function(results) {
                               Empirical_SE = round(c(ate_stats["empirical_se"],att_stats["empirical_se"]),4),
                               Coverage = round(c(ate_stats["coverage"],att_stats["coverage"]),3))
   
-  cat("\n=== Simulation Summary ===\n\n")
+  cat("\n=== Simulation Summary ===\n")
+  cat(sprintf("N simulations: %d | Sample size: %d | Missing outcome: %s | Cross-fitting: %s\n\n",
+              nrow(results),
+              results$n[1],
+              results$missing_outcome[1],
+              results$crossFit[1]))
   print(summary_table,row.names = FALSE)
   
   return(summary_table)
@@ -675,44 +855,69 @@ summarize_simulation <- function(results) {
 
 
 ### number of sims
-N_SIMS <- 800
-# set.seed(80924)
+N_SIMS <- 1500
 
-### completely observed outcomes
-# N = 500
-sim_results <- run_simulation_study(n_sims = N_SIMS,n = 625,
+
+# without cross-fitting
+sim_results <- run_simulation_study(n_sims = N_SIMS,
+                                    n = 1875,
                                     trunc_level = 0.005,
                                     missing_outcome = FALSE,
-                                    prob_observed_baseline = 0.8,
-                                    use_fixed_covariates = TRUE)
+                                    crossFit = FALSE)
 summary_results <- summarize_simulation(sim_results)
 
-# N = 1500
-sim_results <- run_simulation_study(n_sims = N_SIMS,n = 1875,
-                                    trunc_level = 0.005,
-                                    missing_outcome = FALSE,
-                                    prob_observed_baseline = 0.8,
-                                    use_fixed_covariates = TRUE)
-summary_results <- summarize_simulation(sim_results)
-
-
-
-### missing outcomes
-# N = 500
-sim_results <- run_simulation_study(n_sims = N_SIMS,n = 625,
-                                    trunc_level = 0.005,
-                                    missing_outcome = TRUE,
-                                    prob_observed_baseline = 0.8,
-                                    use_fixed_covariates = TRUE)
-summary_results <- summarize_simulation(sim_results)
-
-# N = 1500
 sim_results <- run_simulation_study(n_sims = N_SIMS,n = 1875,
                                     trunc_level = 0.005,
                                     missing_outcome = TRUE,
-                                    prob_observed_baseline = 0.8,
-                                    use_fixed_covariates = TRUE)
+                                    crossFit = FALSE)
 summary_results <- summarize_simulation(sim_results)
+
+
+
+### number of sims
+N_SIMS <- 100
+
+# with cross-fitting
+sim_results_cf <- run_simulation_study(n_sims = N_SIMS,
+                                       n = 1875,
+                                       trunc_level = 0.005,
+                                       missing_outcome = FALSE,
+                                       crossFit = TRUE,
+                                       n_folds = 5)
+sim_results_cf <- summarize_simulation(sim_results_cf)
+
+
+
+
+# ### completely observed outcomes
+# # N = 500
+# sim_results <- run_simulation_study(n_sims = N_SIMS,n = 625,
+#                                     trunc_level = 0.005,
+#                                     missing_outcome = FALSE,
+#                                     prob_observed_baseline = 0.8,
+#                                     use_fixed_covariates = TRUE)
+# summary_results <- summarize_simulation(sim_results)
+# 
+# # N = 1500
+# sim_results <- run_simulation_study(n_sims = N_SIMS,n = 1875,
+#                                     trunc_level = 0.005,
+#                                     missing_outcome = FALSE,
+#                                     prob_observed_baseline = 0.8,
+#                                     use_fixed_covariates = TRUE)
+# summary_results <- summarize_simulation(sim_results)
+# 
+# 
+# 
+# ### missing outcomes
+# # N = 500
+# sim_results <- run_simulation_study(n_sims = N_SIMS,n = 625,
+#                                     trunc_level = 0.005,
+#                                     missing_outcome = TRUE,
+#                                     prob_observed_baseline = 0.8,
+#                                     use_fixed_covariates = TRUE)
+# summary_results <- summarize_simulation(sim_results)
+
+
 
 
 

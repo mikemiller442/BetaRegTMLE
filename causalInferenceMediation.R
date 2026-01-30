@@ -149,12 +149,9 @@ robustcompNDE <- function(outcome_mod,mediator_mod,ps_mod,covariates,
   # filter to only those with A=0
   data_tmle_nde_subset <- data_tmle_nde[exposure == 0,]
   # calculate fluctuation parameter
-  eps_nde <- tryCatch({
-    coef(glm(pseudo_outcome ~ -1 + offset(qlogis(pred_vals)) + H_Z,
-             data = data_tmle_nde_subset,
-             family = "binomial"))
-  },error = function(e) 0)
-  if (is.na(eps_nde) || !is.finite(eps_nde)) eps_nde <- 0
+  eps_nde <- coef(glm(pseudo_outcome ~ -1 + offset(qlogis(pred_vals)) + H_Z,
+                      data = data_tmle_nde_subset,
+                      family = "binomial"))
   
   # update the NDE estimates using fluctuation parameter
   nde_cond_star_scaled <- plogis(qlogis(nde_cond_scaled) + eps_nde * H_Z)
@@ -242,12 +239,8 @@ robustcompNIE <- function(outcome_mod,mediator_mod,ps_mod,covariates,
   
   if (use_regression_psi) {
     ### regression based approach for psi_NIE
-    # scale Q_bar_Y_1Z_star to (0,1) for beta regression
-    Q_bar_scaled <- (Q_bar_Y_1Z_star * (n - 1) + 0.5) / n
-    Q_bar_scaled <- pmax(pmin(Q_bar_scaled,1 - 1e-6),1e-6)
-    
     # fit regression among A=1 to get E[Q_bar | W,A=1]
-    data_a1 <- data.frame(Q_bar = Q_bar_scaled[exposure == 1],
+    data_a1 <- data.frame(Q_bar = Q_bar_Y_1Z_star[exposure == 1],
                           age = covariates$age[exposure == 1],
                           post_discharge_disability = covariates$post_discharge_disability[exposure == 1],
                           stroke_severity = covariates$stroke_severity[exposure == 1],
@@ -256,7 +249,7 @@ robustcompNIE <- function(outcome_mod,mediator_mod,ps_mod,covariates,
                           data = data_a1)
     
     # fit regression among A=0 to get E[Q_bar | W,A=0]
-    data_a0 <- data.frame(Q_bar = Q_bar_scaled[exposure == 0],
+    data_a0 <- data.frame(Q_bar = Q_bar_Y_1Z_star[exposure == 0],
                           age = covariates$age[exposure == 0],
                           post_discharge_disability = covariates$post_discharge_disability[exposure == 0],
                           stroke_severity = covariates$stroke_severity[exposure == 0],
@@ -274,40 +267,29 @@ robustcompNIE <- function(outcome_mod,mediator_mod,ps_mod,covariates,
     
     # TMLE targeting for psi_nie_z_1 (using A=1 observations)
     H_Z_1 <- ifelse(exposure == 1,1 / ps_trunc,0)
-    data_tmle_psi1 <- data.frame(pseudo_outcome = Q_bar_scaled,
+    data_tmle_psi1 <- data.frame(pseudo_outcome = Q_bar_Y_1Z_star,
                                  pred_vals = psi_nie_z_1_reg,
                                  H_Z_1 = H_Z_1)
     data_tmle_psi1$pred_vals <- pmax(pmin(data_tmle_psi1$pred_vals,1 - 1e-6),1e-6)
     data_tmle_psi1_subset <- data_tmle_psi1[exposure == 1,]
     
-    eps_psi_1 <- tryCatch({
-      coef(glm(pseudo_outcome ~ -1 + offset(qlogis(pred_vals)) + H_Z_1,
-               data = data_tmle_psi1_subset,family = "binomial"))
-    },error = function(e) 0)
-    if (is.na(eps_psi_1) || !is.finite(eps_psi_1)) eps_psi_1 <- 0
+    eps_psi_1 <- coef(glm(pseudo_outcome ~ -1 + offset(qlogis(pred_vals)) + H_Z_1,
+                          data = data_tmle_psi1_subset,family = "binomial"))
     
-    psi_nie_z_1_star_scaled <- plogis(qlogis(psi_nie_z_1_reg) + eps_psi_1 * H_Z_1)
+    psi_nie_z_1_star <- plogis(qlogis(psi_nie_z_1_reg) + eps_psi_1 * H_Z_1)
     
     # TMLE targeting for psi_nie_z_0 (using A=0 observations)
     H_Z_0 <- ifelse(exposure == 0,1 / (1 - ps_trunc),0)
-    data_tmle_psi0 <- data.frame(pseudo_outcome = Q_bar_scaled,
+    data_tmle_psi0 <- data.frame(pseudo_outcome = Q_bar_Y_1Z_star,
                                  pred_vals = psi_nie_z_0_reg,
                                  H_Z_0 = H_Z_0)
     data_tmle_psi0$pred_vals <- pmax(pmin(data_tmle_psi0$pred_vals,1 - 1e-6),1e-6)
     data_tmle_psi0_subset <- data_tmle_psi0[exposure == 0,]
     
-    eps_psi_0 <- tryCatch({
-      coef(glm(pseudo_outcome ~ -1 + offset(qlogis(pred_vals)) + H_Z_0,
-               data = data_tmle_psi0_subset,family = "binomial"))
-    },error = function(e) 0)
-    if (is.na(eps_psi_0) || !is.finite(eps_psi_0)) eps_psi_0 <- 0
+    eps_psi_0 <- coef(glm(pseudo_outcome ~ -1 + offset(qlogis(pred_vals)) + H_Z_0,
+                          data = data_tmle_psi0_subset,family = "binomial"))
     
-    psi_nie_z_0_star_scaled <- plogis(qlogis(psi_nie_z_0_reg) + eps_psi_0 * H_Z_0)
-    
-    # unscale back to original scale
-    psi_nie_z_1_star <- (psi_nie_z_1_star_scaled * n - 0.5) / (n - 1)
-    psi_nie_z_0_star <- (psi_nie_z_0_star_scaled * n - 0.5) / (n - 1)
-    
+    psi_nie_z_0_star <- plogis(qlogis(psi_nie_z_0_reg) + eps_psi_0 * H_Z_0)
   } else {
     ### mediator density weighting for psi_NIE
     # calculate NIE parameter using targeted outcome regression
@@ -333,34 +315,17 @@ robustcompNIE <- function(outcome_mod,mediator_mod,ps_mod,covariates,
     ### calculate targeted estimate of NIE
     H_Z_1 <- ifelse(exposure == 1,1 / ps_trunc,0)
     H_Z_0 <- ifelse(exposure == 0,1 / (1 - ps_trunc),0)
-    # find common range for scaling
-    all_preds <- c(psi_nie_z_0,psi_nie_z_1,Q_bar_Y_1Z_star)
-    min_all <- min(all_preds)
-    max_all <- max(all_preds)
-    range_all <- max_all - min_all
-    if (range_all < 1e-10) {
-      range_all <- 1
-    }
-    scale_pred <- function(x) {
-      x_scaled <- (x - min_all) / range_all
-      x_scaled <- (x_scaled * (n - 1) + 0.5) / n
-      x_scaled <- pmax(pmin(x_scaled,1 - 1e-10),1e-10)
-      return(x_scaled)
-    }
-    psi_nie_z_0_scaled <- scale_pred(psi_nie_z_0)
-    psi_nie_z_1_scaled <- scale_pred(psi_nie_z_1)
-    Q_bar_Y_1Z_star_scaled <- scale_pred(Q_bar_Y_1Z_star)
     # calculate regression model for A=1
-    data_tmle_a1 <- data.frame(pseudo_outcome = Q_bar_Y_1Z_star_scaled,
-                               pred_vals = psi_nie_z_1_scaled,
+    data_tmle_a1 <- data.frame(pseudo_outcome = Q_bar_Y_1Z_star,
+                               pred_vals = psi_nie_z_1,
                                H_Z_1 = H_Z_1)
     data_tmle_a1_subset <- data_tmle_a1[exposure == 1,]
     eps_nie_1 <- coef(glm(pseudo_outcome ~ -1 + offset(qlogis(pred_vals)) + H_Z_1,
                           data = data_tmle_a1_subset,
                           family = "binomial"))
     # calculate regression model for A=0
-    data_tmle_a0 <- data.frame(pseudo_outcome = Q_bar_Y_1Z_star_scaled,
-                               pred_vals = psi_nie_z_0_scaled,
+    data_tmle_a0 <- data.frame(pseudo_outcome = Q_bar_Y_1Z_star,
+                               pred_vals = psi_nie_z_0,
                                H_Z_0 = H_Z_0)
     data_tmle_a0_subset <- data_tmle_a0[exposure == 0,]
     eps_nie_0 <- coef(glm(pseudo_outcome ~ -1 + offset(qlogis(pred_vals)) + H_Z_0,
@@ -368,14 +333,8 @@ robustcompNIE <- function(outcome_mod,mediator_mod,ps_mod,covariates,
                           family = "binomial"))
     
     # calculate targeted estimates for all observations
-    psi_nie_z_1_star_scaled <- plogis(qlogis(psi_nie_z_1_scaled) + eps_nie_1 * H_Z_1)
-    psi_nie_z_0_star_scaled <- plogis(qlogis(psi_nie_z_0_scaled) + eps_nie_0 * H_Z_0)
-    # transform back
-    unscale_pred <- function(x_scaled) {
-      (x_scaled * n - 0.5) / (n - 1) * range_all + min_all
-    }
-    psi_nie_z_1_star <- unscale_pred(psi_nie_z_1_star_scaled)
-    psi_nie_z_0_star <- unscale_pred(psi_nie_z_0_star_scaled)
+    psi_nie_z_1_star <- plogis(qlogis(psi_nie_z_1) + eps_nie_1 * H_Z_1)
+    psi_nie_z_0_star <- plogis(qlogis(psi_nie_z_0) + eps_nie_0 * H_Z_0)
   }
   
   ### calculate final NIE estimate
@@ -670,7 +629,6 @@ generate_stroke_data_mediation <- function(n = 1000,
 }
 
 ### Example usage
-set.seed(80924)
 sim_data <- generate_stroke_data_mediation(n = 1000)
 
 # Check key properties
@@ -692,58 +650,69 @@ summary(glm(rehabIRF ~ age + post_discharge_disability + stroke_severity + comor
             data = sim_data$data,family = binomial))
 
 
-# Run a single simulation
+
+
+
+
+
+
+# Run a single simulation iteration for NDE/NIE estimation
 run_single_simulation_mediation_full <- function(n = 1000,
                                                  exposure_name = "insured",
                                                  mediator_name = "rehabIRF",
                                                  trunc_level = 0.001,
-                                                 missing_outcome = FALSE,
-                                                 prob_observed_baseline = 0.8,
-                                                 fixed_covariates = NULL,
                                                  use_regression_psi = FALSE) {
   
-  # generate data
+  # expects fixed_covariates to exist in parent environment
   sim_data <- generate_stroke_data_mediation(n = n,
                                              exposure_name = exposure_name,
                                              mediator_name = mediator_name,
-                                             missing_outcome = missing_outcome,
-                                             prob_observed_baseline = prob_observed_baseline,
                                              fixed_covariates = fixed_covariates)
   
   data <- sim_data$data
-  observed_adl <- data$observed_adl
   
   # re-scale outcomes to 0-1 for modeling
   data$OUT3_ADL_IADL_01 <- data$OUT3_ADL_IADL / 3.0
   N_adl <- nrow(data)
   data$OUT3_ADL_IADL_01 <- (data$OUT3_ADL_IADL_01 * (N_adl - 1) + 0.5) / N_adl
   
-  # fit models
-  ps_exposure_formula <- as.formula(paste(exposure_name,
-                                          "~ age + post_discharge_disability + stroke_severity + comorbidity"))
-  ps_exposure_model <- glm(ps_exposure_formula,data = data,family = binomial())
+  # Initialize NDE results
+  nde_adl <- NA
+  nde_se_adl <- NA
+  nde_ci_lower_adl <- NA
+  nde_ci_upper_adl <- NA
+  nde_converged <- FALSE
   
-  mediator_formula <- as.formula(paste(mediator_name,
-                                       "~ age + post_discharge_disability + stroke_severity + comorbidity +",
-                                       exposure_name))
-  mediator_model <- glm(mediator_formula,data = data,family = binomial())
+  # Initialize NIE results
+  nie_adl <- NA
+  nie_se_adl <- NA
+  nie_ci_lower_adl <- NA
+  nie_ci_upper_adl <- NA
+  nie_converged <- FALSE
   
-  # outcome model with all pairwise and three-way interactions
-  outcome_formula <- as.formula(paste(
-    "OUT3_ADL_IADL_01 ~ age + post_discharge_disability + stroke_severity + comorbidity +",
-    exposure_name,"+",mediator_name,"+",
-    exposure_name,"*",mediator_name,"+",
-    exposure_name,"* post_discharge_disability +",
-    mediator_name,"* post_discharge_disability +",
-    exposure_name,"*",mediator_name,"* post_discharge_disability"
-  ))
-  adl_mod <- betareg(outcome_formula,data = data)
+  #########
+  ### Fit models with hardcoded formulas
+  #########
   
-  # Calculate NDE
+  # Propensity score model P(A|W)
+  ps_mod <- glm(insured ~ age + post_discharge_disability + stroke_severity + comorbidity,
+                data = data, family = binomial())
+  
+  # Mediator model P(M|A,W)
+  mediator_mod <- glm(rehabIRF ~ age + post_discharge_disability + stroke_severity + comorbidity
+                      + insured,
+                      data = data, family = binomial())
+  
+  # Outcome model E[Y|A,M,W] with all interactions matching DGM
+  outcome_mod <- betareg(OUT3_ADL_IADL_01 ~ age + stroke_severity + comorbidity
+                         + insured*rehabIRF*post_discharge_disability,
+                         data = data)
+  
+  ### Calculate NDE
   tryCatch({
-    results_nde <- robustcompNDE(outcome_mod = adl_mod,
-                                 mediator_mod = mediator_model,
-                                 ps_mod = ps_exposure_model,
+    results_nde <- robustcompNDE(outcome_mod = outcome_mod,
+                                 mediator_mod = mediator_mod,
+                                 ps_mod = ps_mod,
                                  covariates = data,
                                  exposure_name = exposure_name,
                                  mediator_name = mediator_name,
@@ -757,20 +726,16 @@ run_single_simulation_mediation_full <- function(n = 1000,
     nde_ci_lower_adl <- results_nde$CI["lower"]
     nde_ci_upper_adl <- results_nde$CI["upper"]
     nde_converged <- TRUE
-  },error = function(e) {
-    warning(paste("NDE estimation failed:",e$message))
-    nde_adl <<- NA
-    nde_se_adl <<- NA
-    nde_ci_lower_adl <<- NA
-    nde_ci_upper_adl <<- NA
-    nde_converged <<- FALSE
+    
+  }, error = function(e) {
+    warning(paste("NDE estimation failed:", e$message))
   })
   
-  # calculate NIE
+  ### Calculate NIE
   tryCatch({
-    results_nie <- robustcompNIE(outcome_mod = adl_mod,
-                                 mediator_mod = mediator_model,
-                                 ps_mod = ps_exposure_model,
+    results_nie <- robustcompNIE(outcome_mod = outcome_mod,
+                                 mediator_mod = mediator_mod,
+                                 ps_mod = ps_mod,
                                  covariates = data,
                                  exposure_name = exposure_name,
                                  mediator_name = mediator_name,
@@ -784,17 +749,13 @@ run_single_simulation_mediation_full <- function(n = 1000,
     nie_ci_lower_adl <- results_nie$CI["lower"]
     nie_ci_upper_adl <- results_nie$CI["upper"]
     nie_converged <- TRUE
-  },error = function(e) {
-    warning(paste("NIE estimation failed:",e$message))
-    nie_adl <<- NA
-    nie_se_adl <<- NA
-    nie_ci_lower_adl <<- NA
-    nie_ci_upper_adl <<- NA
-    nie_converged <<- FALSE
+    
+  }, error = function(e) {
+    warning(paste("NIE estimation failed:", e$message))
   })
   
-  # calculate biases and coverage
-  if (nde_converged) {
+  # Calculate bias and coverage for NDE
+  if (nde_converged && !is.na(nde_adl) && is.finite(nde_adl)) {
     nde_bias <- nde_adl - sim_data$true_nde
     nde_covers <- (nde_ci_lower_adl <= sim_data$true_nde) & 
       (sim_data$true_nde <= nde_ci_upper_adl)
@@ -803,7 +764,8 @@ run_single_simulation_mediation_full <- function(n = 1000,
     nde_covers <- NA
   }
   
-  if (nie_converged) {
+  # Calculate bias and coverage for NIE
+  if (nie_converged && !is.na(nie_adl) && is.finite(nie_adl)) {
     nie_bias <- nie_adl - sim_data$true_nie
     nie_covers <- (nie_ci_lower_adl <= sim_data$true_nie) & 
       (sim_data$true_nie <= nie_ci_upper_adl)
@@ -812,185 +774,205 @@ run_single_simulation_mediation_full <- function(n = 1000,
     nie_covers <- NA
   }
   
-  # extract results
-  results_df <- data.frame(n = n,
-                           exposure_name = exposure_name,
-                           mediator_name = mediator_name,
-                           trunc_level = trunc_level,
-                           missing_outcome = missing_outcome,
-                           use_regression_psi = use_regression_psi,
-                           # NDE results
-                           nde_adl = nde_adl,
-                           nde_se_adl = nde_se_adl,
-                           nde_ci_lower_adl = nde_ci_lower_adl,
-                           nde_ci_upper_adl = nde_ci_upper_adl,
-                           nde_bias = nde_bias,
-                           nde_covers = nde_covers,
-                           nde_converged = nde_converged,
-                           # NIE results
-                           nie_adl = nie_adl,
-                           nie_se_adl = nie_se_adl,
-                           nie_ci_lower_adl = nie_ci_lower_adl,
-                           nie_ci_upper_adl = nie_ci_upper_adl,
-                           nie_bias = nie_bias,
-                           nie_covers = nie_covers,
-                           nie_converged = nie_converged,
-                           # True values
-                           true_nde_adl = sim_data$true_nde,
-                           true_nie_adl = sim_data$true_nie,
-                           true_te_adl = sim_data$true_te,
-                           true_prop_mediated = sim_data$true_prop_mediated,
-                           # Sample characteristics
-                           prop_insured = mean(data[[exposure_name]]),
-                           prop_rehabIRF = mean(data[[mediator_name]]))
-  
-  return(results_df)
+  data.frame(n = n,
+             trunc_level = trunc_level,
+             use_regression_psi = use_regression_psi,
+             # NDE estimates
+             nde_adl = nde_adl,
+             nde_se_adl = nde_se_adl,
+             nde_ci_lower_adl = nde_ci_lower_adl,
+             nde_ci_upper_adl = nde_ci_upper_adl,
+             nde_bias = nde_bias,
+             nde_covers = nde_covers,
+             nde_converged = nde_converged,
+             # NIE estimates
+             nie_adl = nie_adl,
+             nie_se_adl = nie_se_adl,
+             nie_ci_lower_adl = nie_ci_lower_adl,
+             nie_ci_upper_adl = nie_ci_upper_adl,
+             nie_bias = nie_bias,
+             nie_covers = nie_covers,
+             nie_converged = nie_converged,
+             # True values
+             true_nde_adl = sim_data$true_nde,
+             true_nie_adl = sim_data$true_nie,
+             true_te_adl = sim_data$true_te,
+             true_prop_mediated = sim_data$true_prop_mediated,
+             # Sample characteristics
+             prop_insured = mean(data[[exposure_name]]),
+             prop_rehabIRF = mean(data[[mediator_name]]))
 }
 
 
-### Run multiple simulations to assess performance for both NDE and NIE
-run_simulation_study_mediation_full <- function(n_sims = 100,
-                                                n = 1000,
-                                                trunc_level = 0.001,
-                                                use_regression_psi = FALSE,
-                                                use_fixed_covariates = FALSE) {
+# run simulation study for NDE/NIE
+run_simulation_study_mediation <- function(n_sims = 100,
+                                           n = 1000,
+                                           exposure_name = "insured",
+                                           mediator_name = "rehabIRF",
+                                           trunc_level = 0.001,
+                                           use_regression_psi = FALSE) {
   
-  # Generate fixed covariates once if requested
-  fixed_covariates <- NULL
-  if (use_fixed_covariates) {
-    cat("Generating fixed covariates for all simulations...\n")
-    # Generate one dataset and extract the fixed_covariates object
-    # (not just the covariate columns)
-    temp_sim <- generate_stroke_data_mediation(n = n)
-    fixed_covariates <- temp_sim$fixed_covariates
-    cat("Fixed covariates generated.\n")
-  }
+  # Generate fixed covariates once and assign to parent environment
+  initial_data <- generate_stroke_data_mediation(n = n,
+                                                 exposure_name = exposure_name,
+                                                 mediator_name = mediator_name)
+  # assign covariates to parent environment
+  # considerably faster than passing as an argument for each simulation
+  fixed_covariates <<- initial_data$fixed_covariates
   
   results_list <- vector("list", n_sims)
   
-  # progress bar
   pb <- txtProgressBar(min = 0, max = n_sims, style = 3)
   
   for (i in 1:n_sims) {
     results_list[[i]] <- run_single_simulation_mediation_full(n = n,
+                                                              exposure_name = exposure_name,
+                                                              mediator_name = mediator_name,
                                                               trunc_level = trunc_level,
-                                                              use_regression_psi = use_regression_psi,
-                                                              fixed_covariates = fixed_covariates)
+                                                              use_regression_psi = use_regression_psi)
     setTxtProgressBar(pb, i)
   }
   
   close(pb)
   
-  # combine results
   results_df <- do.call(rbind, results_list)
   
-  # calculate summary statistics
-  summary_stats <- data.frame(n = n,
-                              n_sims = n_sims,
-                              use_regression_psi = use_regression_psi,
-                              use_fixed_covariates = use_fixed_covariates,
-                              n_converged_nde = sum(results_df$nde_converged, na.rm = TRUE),
-                              n_converged_nie = sum(results_df$nie_converged, na.rm = TRUE),
-                              # NDE performance
-                              nde_mean = mean(results_df$nde_adl, na.rm = TRUE),
-                              nde_true = unique(results_df$true_nde_adl)[1],
-                              nde_bias = mean(results_df$nde_bias, na.rm = TRUE),
-                              nde_empirical_se = sd(results_df$nde_adl, na.rm = TRUE),
-                              nde_mean_se = mean(results_df$nde_se_adl, na.rm = TRUE),
-                              nde_coverage = mean(results_df$nde_covers, na.rm = TRUE),
-                              nde_rmse = sqrt(mean(results_df$nde_bias^2, na.rm = TRUE)),
-                              # NIE performance
-                              nie_mean = mean(results_df$nie_adl, na.rm = TRUE),
-                              nie_true = unique(results_df$true_nie_adl)[1],
-                              nie_bias = mean(results_df$nie_bias, na.rm = TRUE),
-                              nie_empirical_se = sd(results_df$nie_adl, na.rm = TRUE),
-                              nie_mean_se = mean(results_df$nie_se_adl, na.rm = TRUE),
-                              nie_coverage = mean(results_df$nie_covers, na.rm = TRUE),
-                              nie_rmse = sqrt(mean(results_df$nie_bias^2, na.rm = TRUE)),
-                              # total effect from sum
-                              te_from_sum_mean = mean(results_df$nde_adl + results_df$nie_adl, na.rm = TRUE),
-                              te_true = unique(results_df$true_te_adl)[1])
+  # Clean up global variable
+  rm(fixed_covariates, envir = .GlobalEnv)
   
-  return(list(results = results_df,
-              summary = summary_stats,
-              fixed_covariates = if(use_fixed_covariates) fixed_covariates else NULL))
+  return(results_df)
 }
 
 
+# summarize simulation results for NDE/NIE
+summarize_simulation_mediation <- function(results_df) {
+  
+  # NDE summary statistics
+  nde_summary <- list(mean_estimate = mean(results_df$nde_adl, na.rm = TRUE),
+                      mean_bias = mean(results_df$nde_bias, na.rm = TRUE),
+                      mean_se = mean(results_df$nde_se_adl, na.rm = TRUE),
+                      empirical_se = sd(results_df$nde_adl, na.rm = TRUE),
+                      coverage = mean(results_df$nde_covers, na.rm = TRUE),
+                      rmse = sqrt(mean(results_df$nde_bias^2, na.rm = TRUE)),
+                      convergence_rate = sum(results_df$nde_converged, na.rm = TRUE) / nrow(results_df))
+  
+  # NIE summary statistics
+  nie_summary <- list(mean_estimate = mean(results_df$nie_adl, na.rm = TRUE),
+                      mean_bias = mean(results_df$nie_bias, na.rm = TRUE),
+                      mean_se = mean(results_df$nie_se_adl, na.rm = TRUE),
+                      empirical_se = sd(results_df$nie_adl, na.rm = TRUE),
+                      coverage = mean(results_df$nie_covers, na.rm = TRUE),
+                      rmse = sqrt(mean(results_df$nie_bias^2, na.rm = TRUE)),
+                      convergence_rate = sum(results_df$nie_converged, na.rm = TRUE) / nrow(results_df))
+  
+  # TE from sum
+  te_from_sum <- results_df$nde_adl + results_df$nie_adl
+  te_summary <- list(mean_estimate = mean(te_from_sum, na.rm = TRUE),
+                     empirical_se = sd(te_from_sum, na.rm = TRUE))
+  
+  # Sample characteristics
+  sample_characteristics <- list(mean_prop_exposure = mean(results_df$prop_insured, na.rm = TRUE),
+                                 mean_prop_mediator = mean(results_df$prop_rehabIRF, na.rm = TRUE))
+  
+  # true values (should be constant across simulations)
+  true_values <- list(true_nde = mean(results_df$true_nde_adl, na.rm = TRUE),
+                      true_nie = mean(results_df$true_nie_adl, na.rm = TRUE),
+                      true_te = mean(results_df$true_te_adl, na.rm = TRUE),
+                      prop_mediated = mean(results_df$true_prop_mediated, na.rm = TRUE))
+  
+  summary_stats <- list(NDE = nde_summary,
+                        NIE = nie_summary,
+                        TE = te_summary,
+                        sample_characteristics = sample_characteristics,
+                        true_values = true_values,
+                        n_simulations = nrow(results_df),
+                        n = results_df$n[1],
+                        use_regression_psi = results_df$use_regression_psi[1])
+  
+  return(summary_stats)
+}
+
+
+# print formatted summary of mediation simulation results
+print_simulation_summary_mediation <- function(summary_stats) {
+  
+  method_name <- ifelse(summary_stats$use_regression_psi, 
+                        "REGRESSION", 
+                        "MEDIATOR DENSITY WEIGHTING")
+  
+  cat("\n")
+  cat("MEDIATION SIMULATION RESULTS (NDE/NIE)\n")
+  cat("======================================\n")
+  cat(sprintf("N simulations: %d | Sample size: %d | Method: %s\n",
+              summary_stats$n_simulations,
+              summary_stats$n,
+              method_name))
+  cat(sprintf("P(Exposure=1): %.3f | P(Mediator=1): %.3f\n",
+              summary_stats$sample_characteristics$mean_prop_exposure,
+              summary_stats$sample_characteristics$mean_prop_mediator))
+  
+  cat("\nTRUE CAUSAL EFFECTS\n")
+  cat("-------------------\n")
+  cat(sprintf("True NDE:            %.4f\n", summary_stats$true_values$true_nde))
+  cat(sprintf("True NIE:            %.4f\n", summary_stats$true_values$true_nie))
+  cat(sprintf("True TE:             %.4f\n", summary_stats$true_values$true_te))
+  cat(sprintf("Proportion Mediated: %.3f\n", summary_stats$true_values$prop_mediated))
+  
+  cat("\nESTIMATION RESULTS\n")
+  cat("------------------\n")
+  cat("Estimand    True      Est       Bias      Model_SE  Emp_SE    Coverage\n")
+  cat("----------- --------  --------  --------  --------  --------  --------\n")
+  cat(sprintf("NDE         %.4f    %.4f    %.4f    %.4f    %.4f    %.3f\n",
+              summary_stats$true_values$true_nde,
+              summary_stats$NDE$mean_estimate,
+              summary_stats$NDE$mean_bias,
+              summary_stats$NDE$mean_se,
+              summary_stats$NDE$empirical_se,
+              summary_stats$NDE$coverage))
+  cat(sprintf("NIE         %.4f    %.4f    %.4f    %.4f    %.4f    %.3f\n",
+              summary_stats$true_values$true_nie,
+              summary_stats$NIE$mean_estimate,
+              summary_stats$NIE$mean_bias,
+              summary_stats$NIE$mean_se,
+              summary_stats$NIE$empirical_se,
+              summary_stats$NIE$coverage))
+  cat(sprintf("TE (sum)    %.4f    %.4f\n",
+              summary_stats$true_values$true_te,
+              summary_stats$TE$mean_estimate))
+  
+  cat("\nCONVERGENCE RATES\n")
+  cat("-----------------\n")
+  cat(sprintf("NDE: %.1f%% | NIE: %.1f%%\n",
+              summary_stats$NDE$convergence_rate * 100,
+              summary_stats$NIE$convergence_rate * 100))
+}
+
 
 # number of sims
-N_SIMS <- 800
+N_SIMS <- 400
 
-# mediator density approach
-sim_study_med <- run_simulation_study_mediation_full(n_sims = N_SIMS,
-                                                     n = 1000,
-                                                     use_regression_psi = FALSE,
-                                                     use_fixed_covariates = TRUE)
 
-# regression based estimator
-sim_study_reg <- run_simulation_study_mediation_full(n_sims = N_SIMS,
-                                                     n = 1000,
-                                                     use_regression_psi = TRUE,
-                                                     use_fixed_covariates = TRUE)
+# test with mediator density weighting
+cat("\n=== Running with MEDIATOR DENSITY weighting ===\n")
+sim_study_med <- run_simulation_study_mediation(n_sims = N_SIMS,n = 4000,
+                                                     use_regression_psi = FALSE)
 
-cat("\nSimulation Study Summary:\n")
-print(sim_study_med$summary)
-
-# print detailed summary table
-cat("\n=== Detailed Performance Summary ===\n")
-cat("\nNatural Direct Effect (NDE):\n")
-cat("  True value:        ",round(sim_study_med$summary$nde_true,4),"\n")
-cat("  Mean estimate:     ",round(sim_study_med$summary$nde_mean,4),"\n")
-cat("  Bias:              ",round(sim_study_med$summary$nde_bias,4),"\n")
-cat("  Empirical SE:      ",round(sim_study_med$summary$nde_empirical_se,4),"\n")
-cat("  Mean estimated SE: ",round(sim_study_med$summary$nde_mean_se,4),"\n")
-cat("  Coverage:          ",round(sim_study_med$summary$nde_coverage,3),"\n")
-cat("  Convergence rate:  ",round(sim_study_med$summary$n_converged_nde / sim_study_med$summary$n_sims,3),"\n")
-
-cat("\nNatural Indirect Effect (NIE):\n")
-cat("  True value:        ",round(sim_study_med$summary$nie_true,4),"\n")
-cat("  Mean estimate:     ",round(sim_study_med$summary$nie_mean,4),"\n")
-cat("  Bias:              ",round(sim_study_med$summary$nie_bias,4),"\n")
-cat("  Empirical SE:      ",round(sim_study_med$summary$nie_empirical_se,4),"\n")
-cat("  Mean estimated SE: ",round(sim_study_med$summary$nie_mean_se,4),"\n")
-cat("  Coverage:          ",round(sim_study_med$summary$nie_coverage,3),"\n")
-cat("  Convergence rate:  ",round(sim_study_med$summary$n_converged_nie / sim_study_med$summary$n_sims,3),"\n")
-
-cat("\nTotal Effect Check:\n")
-cat("  True TE:           ",round(sim_study_med$summary$te_true,4),"\n")
-cat("  Mean(NDE + NIE):   ",round(sim_study_med$summary$te_from_sum_mean,4),"\n")
-cat("  Difference:        ",round(sim_study_med$summary$te_from_sum_mean - sim_study_med$summary$te_true,4),"\n")
+# display results
+sim_summary <- summarize_simulation_mediation(sim_study_med)
+print_simulation_summary_mediation(sim_summary)
 
 
 
 
-cat("\nSimulation Study Summary:\n")
-print(sim_study_reg$summary)
 
-# print detailed summary table
-cat("\n=== Detailed Performance Summary ===\n")
-cat("\nNatural Direct Effect (NDE):\n")
-cat("  True value:        ",round(sim_study_reg$summary$nde_true,4),"\n")
-cat("  Mean estimate:     ",round(sim_study_reg$summary$nde_mean,4),"\n")
-cat("  Bias:              ",round(sim_study_reg$summary$nde_bias,4),"\n")
-cat("  Empirical SE:      ",round(sim_study_reg$summary$nde_empirical_se,4),"\n")
-cat("  Mean estimated SE: ",round(sim_study_reg$summary$nde_mean_se,4),"\n")
-cat("  Coverage:          ",round(sim_study_reg$summary$nde_coverage,3),"\n")
-cat("  Convergence rate:  ",round(sim_study_reg$summary$n_converged_nde / sim_study_reg$summary$n_sims,3),"\n")
+# test with regression-based approach
+cat("\n=== Running with REGRESSION-BASED approach ===\n")
+sim_study_reg <- run_simulation_study_mediation(n_sims = N_SIMS,n = 4000,
+                                                     use_regression_psi = TRUE)
 
-cat("\nNatural Indirect Effect (NIE):\n")
-cat("  True value:        ",round(sim_study_reg$summary$nie_true,4),"\n")
-cat("  Mean estimate:     ",round(sim_study_reg$summary$nie_mean,4),"\n")
-cat("  Bias:              ",round(sim_study_reg$summary$nie_bias,4),"\n")
-cat("  Empirical SE:      ",round(sim_study_reg$summary$nie_empirical_se,4),"\n")
-cat("  Mean estimated SE: ",round(sim_study_reg$summary$nie_mean_se,4),"\n")
-cat("  Coverage:          ",round(sim_study_reg$summary$nie_coverage,3),"\n")
-cat("  Convergence rate:  ",round(sim_study_reg$summary$n_converged_nie / sim_study_reg$summary$n_sims,3),"\n")
-
-cat("\nTotal Effect Check:\n")
-cat("  True TE:           ",round(sim_study_reg$summary$te_true,4),"\n")
-cat("  Mean(NDE + NIE):   ",round(sim_study_reg$summary$te_from_sum_mean,4),"\n")
-cat("  Difference:        ",round(sim_study_reg$summary$te_from_sum_mean - sim_study_reg$summary$te_true,4),"\n")
+# display results
+sim_summary <- summarize_simulation_mediation(sim_study_reg)
+print_simulation_summary_mediation(sim_summary)
 
 
 
@@ -999,75 +981,5 @@ cat("  Difference:        ",round(sim_study_reg$summary$te_from_sum_mean - sim_s
 
 
 
-# mediator density approach
-sim_study_med <- run_simulation_study_mediation_full(n_sims = N_SIMS,
-                                                     n = 5000,
-                                                     use_regression_psi = FALSE,
-                                                     use_fixed_covariates = FALSE)
-
-# regression based estimator
-sim_study_reg <- run_simulation_study_mediation_full(n_sims = N_SIMS,
-                                                     n = 5000,
-                                                     use_regression_psi = TRUE,
-                                                     use_fixed_covariates = FALSE)
-
-cat("\nSimulation Study Summary:\n")
-print(sim_study_med$summary)
-
-# print detailed summary table
-cat("\n=== Detailed Performance Summary ===\n")
-cat("\nNatural Direct Effect (NDE):\n")
-cat("  True value:        ",round(sim_study_med$summary$nde_true,4),"\n")
-cat("  Mean estimate:     ",round(sim_study_med$summary$nde_mean,4),"\n")
-cat("  Bias:              ",round(sim_study_med$summary$nde_bias,4),"\n")
-cat("  Empirical SE:      ",round(sim_study_med$summary$nde_empirical_se,4),"\n")
-cat("  Mean estimated SE: ",round(sim_study_med$summary$nde_mean_se,4),"\n")
-cat("  Coverage:          ",round(sim_study_med$summary$nde_coverage,3),"\n")
-cat("  Convergence rate:  ",round(sim_study_med$summary$n_converged_nde / sim_study_med$summary$n_sims,3),"\n")
-
-cat("\nNatural Indirect Effect (NIE):\n")
-cat("  True value:        ",round(sim_study_med$summary$nie_true,4),"\n")
-cat("  Mean estimate:     ",round(sim_study_med$summary$nie_mean,4),"\n")
-cat("  Bias:              ",round(sim_study_med$summary$nie_bias,4),"\n")
-cat("  Empirical SE:      ",round(sim_study_med$summary$nie_empirical_se,4),"\n")
-cat("  Mean estimated SE: ",round(sim_study_med$summary$nie_mean_se,4),"\n")
-cat("  Coverage:          ",round(sim_study_med$summary$nie_coverage,3),"\n")
-cat("  Convergence rate:  ",round(sim_study_med$summary$n_converged_nie / sim_study_med$summary$n_sims,3),"\n")
-
-cat("\nTotal Effect Check:\n")
-cat("  True TE:           ",round(sim_study_med$summary$te_true,4),"\n")
-cat("  Mean(NDE + NIE):   ",round(sim_study_med$summary$te_from_sum_mean,4),"\n")
-cat("  Difference:        ",round(sim_study_med$summary$te_from_sum_mean - sim_study_med$summary$te_true,4),"\n")
-
-
-
-
-cat("\nSimulation Study Summary:\n")
-print(sim_study_reg$summary)
-
-# print detailed summary table
-cat("\n=== Detailed Performance Summary ===\n")
-cat("\nNatural Direct Effect (NDE):\n")
-cat("  True value:        ",round(sim_study_reg$summary$nde_true,4),"\n")
-cat("  Mean estimate:     ",round(sim_study_reg$summary$nde_mean,4),"\n")
-cat("  Bias:              ",round(sim_study_reg$summary$nde_bias,4),"\n")
-cat("  Empirical SE:      ",round(sim_study_reg$summary$nde_empirical_se,4),"\n")
-cat("  Mean estimated SE: ",round(sim_study_reg$summary$nde_mean_se,4),"\n")
-cat("  Coverage:          ",round(sim_study_reg$summary$nde_coverage,3),"\n")
-cat("  Convergence rate:  ",round(sim_study_reg$summary$n_converged_nde / sim_study_reg$summary$n_sims,3),"\n")
-
-cat("\nNatural Indirect Effect (NIE):\n")
-cat("  True value:        ",round(sim_study_reg$summary$nie_true,4),"\n")
-cat("  Mean estimate:     ",round(sim_study_reg$summary$nie_mean,4),"\n")
-cat("  Bias:              ",round(sim_study_reg$summary$nie_bias,4),"\n")
-cat("  Empirical SE:      ",round(sim_study_reg$summary$nie_empirical_se,4),"\n")
-cat("  Mean estimated SE: ",round(sim_study_reg$summary$nie_mean_se,4),"\n")
-cat("  Coverage:          ",round(sim_study_reg$summary$nie_coverage,3),"\n")
-cat("  Convergence rate:  ",round(sim_study_reg$summary$n_converged_nie / sim_study_reg$summary$n_sims,3),"\n")
-
-cat("\nTotal Effect Check:\n")
-cat("  True TE:           ",round(sim_study_reg$summary$te_true,4),"\n")
-cat("  Mean(NDE + NIE):   ",round(sim_study_reg$summary$te_from_sum_mean,4),"\n")
-cat("  Difference:        ",round(sim_study_reg$summary$te_from_sum_mean - sim_study_reg$summary$te_true,4),"\n")
 
 

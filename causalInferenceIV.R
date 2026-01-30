@@ -11,61 +11,208 @@
 library(betareg)
 
 
+# Helper functions for extracting model information
+extract_formula <- function(mod) {
+  if (inherits(mod,"betareg")) {
+    return(formula(mod))
+  } else {
+    return(formula(mod))
+  }
+}
+
+extract_model_type <- function(mod) {
+  if (inherits(mod,"betareg")) {
+    return("beta")
+  } else {
+    return("glm")
+  }
+}
+
+extract_family <- function(mod) {
+  if (inherits(mod,"betareg")) {
+    return(NULL)
+  } else {
+    return(family(mod))
+  }
+}
+
+
+# Calculate cross-fitted model predictions
+crossfit_predict <- function(formula,data,model_type = "glm",
+                             family = binomial(),newdata_list = NULL,
+                             folds,predict_type = "response") {
+  
+  n_folds <- max(folds)
+  
+  # if newdata_list is NULL, just predict on original data
+  if (is.null(newdata_list)) {
+    newdata_list <- list(original = data)
+  }
+  
+  # initialize output list
+  n_scenarios <- length(newdata_list)
+  predictions_list <- vector("list",n_scenarios)
+  names(predictions_list) <- names(newdata_list)
+  
+  # initialize prediction vectors for each scenario
+  for (i in 1:n_scenarios) {
+    predictions_list[[i]] <- numeric(nrow(newdata_list[[i]]))
+  }
+  
+  # get fold assignments for prediction data
+  pred_folds <- if ("fold" %in% names(newdata_list[[1]])) {
+    newdata_list[[1]]$fold
+  } else {
+    folds
+  }
+  
+  # loop through each fold
+  for (k in 1:n_folds) {
+    # training data: all folds except k
+    train_idx <- which(folds != k)
+    train_data <- data[train_idx,]
+    
+    # test indices for prediction
+    test_idx <- which(pred_folds == k)
+    
+    if (length(test_idx) == 0) next
+    
+    # fit model once on training data
+    if (model_type == "glm") {
+      fit <- glm(formula,data = train_data,family = family)
+    } else if (model_type == "beta") {
+      fit <- betareg::betareg(formula,data = train_data)
+    } else {
+      stop("Unsupported model_type. Use 'glm' or 'beta'.")
+    }
+    
+    # use the fitted model to predict on all scenarios
+    for (i in 1:n_scenarios) {
+      test_data <- newdata_list[[i]][test_idx, , drop = FALSE]
+      predictions_list[[i]][test_idx] <- predict(fit,newdata = test_data,type = predict_type)
+    }
+  }
+  
+  # if only one scenario, return vector instead of list
+  if (n_scenarios == 1) {
+    return(predictions_list[[1]])
+  }
+  
+  return(predictions_list)
+}
+
+
 # Calculates a robust TMLE estimator for the ATE for a single outcome
 robustcompATE <- function(outcome_mod,ps_mod,covariates,
                           exposure_name,outcome_name,
-                          trunc_level,scale_factor = 1.0) {
+                          trunc_level,scale_factor = 1.0,
+                          crossFit = FALSE,n_folds = 5,folds = NULL) {
+  
+  n <- nrow(covariates)
+  exposure <- covariates[[exposure_name]]
+  Y <- covariates[[outcome_name]]
+  
+  # create fold assignments if using cross-fitting
+  if (crossFit) {
+    # use provided folds or create new ones
+    if (is.null(folds)) {
+      folds <- sample(rep(1:n_folds,length.out = n))
+    }
+    covariates$fold <- folds
+    
+    # extract formulas and model information from fitted models
+    ps_formula <- extract_formula(ps_mod)
+    outcome_formula <- extract_formula(outcome_mod)
+    
+    ps_type <- extract_model_type(ps_mod)
+    outcome_type <- extract_model_type(outcome_mod)
+    
+    ps_family <- extract_family(ps_mod)
+    outcome_family <- extract_family(outcome_mod)
+  }
+  
+  ### calculate propensity score P(A=1|W)
+  if (crossFit) {
+    ps_pred <- crossfit_predict(formula = ps_formula,
+                                data = covariates,
+                                model_type = ps_type,
+                                family = ps_family,
+                                newdata_list = list(original = covariates),
+                                folds = folds,
+                                predict_type = "response")
+  } else {
+    ps_pred <- predict(ps_mod,newdata = covariates,type = "response")
+  }
+  ps_trunc <- pmax(pmin(ps_pred,1.0 - trunc_level),trunc_level)
   
   ### calculate clever covariates for TMLE
-  ps_pred <- predict(ps_mod,newdata = covariates,type = "response")
-  ps_trunc <- pmax(pmin(ps_pred,1.0 - trunc_level),trunc_level)
-  exposure <- covariates[[exposure_name]]
-  trunc_weights_0 <- ifelse(exposure == 0,-1.0 / (1.0 - ps_trunc),0)
-  trunc_weights_1 <- ifelse(exposure == 1,1.0 / ps_trunc,0)
-  H_0_Y <- -1.0 * trunc_weights_0
-  H_1_Y <- trunc_weights_1
-  H_A_Y <- ifelse(exposure == 1,H_1_Y,H_0_Y)
+  # Observed clever covariate (depends on actual treatment received)
+  H_A_Y <- ifelse(exposure == 1,
+                  1.0 / ps_trunc,
+                  -1.0 / (1.0 - ps_trunc))
+  
+  # Counterfactual clever covariates (for all observations)
+  H_0_cf <- -1.0 / (1.0 - ps_trunc)
+  H_1_cf <- 1.0 / ps_trunc
+  
+  ### get outcome predictions
+  covariates_0 <- covariates
+  covariates_0[[exposure_name]] <- 0
+  
+  covariates_1 <- covariates
+  covariates_1[[exposure_name]] <- 1
+  
+  if (crossFit) {
+    outcome_preds <- crossfit_predict(formula = outcome_formula,
+                                      data = covariates,
+                                      model_type = outcome_type,
+                                      family = outcome_family,
+                                      newdata_list = list(original = covariates,
+                                                          a0 = covariates_0,
+                                                          a1 = covariates_1),
+                                      folds = folds,
+                                      predict_type = "response")
+    pred_y_A <- outcome_preds$original
+    pred_y_0 <- outcome_preds$a0
+    pred_y_1 <- outcome_preds$a1
+  } else {
+    pred_y_A <- predict(outcome_mod,newdata = covariates,type = "response")
+    pred_y_0 <- predict(outcome_mod,newdata = covariates_0,type = "response")
+    pred_y_1 <- predict(outcome_mod,newdata = covariates_1,type = "response")
+  }
   
   ### estimate fluctuation parameter
-  pred_y <- predict(outcome_mod,newdata = covariates,type = "response")
-  outcome_values <- covariates[[outcome_name]]
-  data_tmle <- data.frame(Y = outcome_values,
-                          pred_vals = pred_y,
+  data_tmle <- data.frame(Y = Y,
+                          pred_vals = pred_y_A,
                           H_A_Y = H_A_Y)
   eps <- coef(glm(Y ~ -1 + offset(qlogis(pred_vals)) + H_A_Y,
                   data = data_tmle,family = "binomial"))
   
   ### update predictions using fluctuation parameter
-  pred_y_A <- predict(outcome_mod,covariates,type = "response")
-  covariates_0 <- covariates
-  covariates_0[[exposure_name]] <- 0
-  covariates_1 <- covariates
-  covariates_1[[exposure_name]] <- 1
-  pred_y_0 <- predict(outcome_mod,covariates_0,type = "response")
-  pred_y_1 <- predict(outcome_mod,covariates_1,type = "response")
+  # Use counterfactual clever covariates for counterfactual predictions
   pred_star_y_A <- plogis(qlogis(pred_y_A) + eps * H_A_Y)
-  pred_star_y_0 <- plogis(qlogis(pred_y_0) + eps * H_0_Y)
-  pred_star_y_1 <- plogis(qlogis(pred_y_1) + eps * H_1_Y)
+  pred_star_y_0 <- plogis(qlogis(pred_y_0) + eps * H_0_cf)
+  pred_star_y_1 <- plogis(qlogis(pred_y_1) + eps * H_1_cf)
   
-  ### calculate ATE using targeted estimates
-  ate_star <- pred_star_y_1 - pred_star_y_0
-  ate_star_scaled <- ate_star * scale_factor
+  ### calculate ATE using targeted estimates (on original scale)
+  ate_star_unscaled <- pred_star_y_1 - pred_star_y_0
+  ate_est_unscaled <- mean(ate_star_unscaled)
+  ate_star_scaled <- ate_star_unscaled * scale_factor
+  ate_est_scaled <- ate_est_unscaled * scale_factor
   
-  ### calculate scaled efficient influence function
-  D_Y <- H_A_Y * (outcome_values - pred_star_y_A)
-  D_W <- ate_star - mean(ate_star)
+  ### calculate efficient influence function
+  D_Y <- H_A_Y * (Y - pred_star_y_A)
+  D_W <- ate_star_unscaled - ate_est_unscaled
   EIF <- (D_Y + D_W) * scale_factor
   
   ### calculate standard errors and confidence intervals
-  n <- length(EIF)
   var_ate <- var(EIF) / n
   se_ate <- sqrt(var_ate)
-  ate_mean <- mean(ate_star_scaled)
-  ci_lower <- ate_mean - qnorm(0.975) * se_ate
-  ci_upper <- ate_mean + qnorm(0.975) * se_ate
+  ci_lower <- ate_est_scaled - qnorm(0.975) * se_ate
+  ci_upper <- ate_est_scaled + qnorm(0.975) * se_ate
   
   ### return results
-  return(list(ATE = ate_mean,
+  return(list(ATE = ate_est_scaled,
               ITE = ate_star_scaled,
               IF = EIF,
               SE = se_ate,
@@ -73,11 +220,22 @@ robustcompATE <- function(outcome_mod,ps_mod,covariates,
 }
 
 
-# Calculate LATE using robust TMLE estimates
-calculate_late_robust <- function(data,outcome_mod_y,outcome_mod_a,iv_model,
+# Calculate CATE using robust TMLE estimates
+# CATE = (E[Y|Z=1,W] - E[Y|Z=0,W]) / (E[A|Z=1,W] - E[A|Z=0,W])
+calculate_cate_robust <- function(data,outcome_mod_y,outcome_mod_a,iv_model,
                                   iv_name = "Z",exposure_name = "rehabIRF",outcome_name_01,
                                   scale_factor = 1.0,trunc_level_num = 0.001,
-                                  trunc_level_denom = 0.001) {
+                                  trunc_level_denom = 0.001,
+                                  crossFit = FALSE,n_folds = 5) {
+  
+  n <- nrow(data)
+  
+  # create shared fold assignments if using cross-fitting
+  if (crossFit) {
+    folds <- sample(rep(1:n_folds,length.out = n))
+  } else {
+    folds <- NULL
+  }
   
   ### calculate ATE for numerator (effect of Z on Y)
   results_numerator <- robustcompATE(outcome_mod = outcome_mod_y,
@@ -86,7 +244,10 @@ calculate_late_robust <- function(data,outcome_mod_y,outcome_mod_a,iv_model,
                                      exposure_name = iv_name,
                                      outcome_name = outcome_name_01,
                                      trunc_level = trunc_level_num,
-                                     scale_factor = scale_factor)
+                                     scale_factor = scale_factor,
+                                     crossFit = crossFit,
+                                     n_folds = n_folds,
+                                     folds = folds)
   
   ### calculate ATE for denominator (effect of Z on A)
   results_denominator <- robustcompATE(outcome_mod = outcome_mod_a,
@@ -95,35 +256,37 @@ calculate_late_robust <- function(data,outcome_mod_y,outcome_mod_a,iv_model,
                                        exposure_name = iv_name,
                                        outcome_name = exposure_name,
                                        trunc_level = trunc_level_denom,
-                                       scale_factor = 1.0)
+                                       scale_factor = 1.0,
+                                       crossFit = crossFit,
+                                       n_folds = n_folds,
+                                       folds = folds)
   
-  ### calculate LATE and approximate 95% confidence interval using delta method
+  ### calculate CATE and approximate 95% confidence interval using delta method
   numerator <- results_numerator$ATE
   denominator <- results_denominator$ATE
-  late <- numerator / denominator
+  cate <- numerator / denominator
   
   ### delta method for variance of ratio using influence functions
   IF_numerator <- results_numerator$IF
   IF_denominator <- results_denominator$IF
   
-  # IF for ratio: (IF_num - LATE * IF_denom) / denom
-  IF_late <- (IF_numerator - late * IF_denominator) / denominator
+  # IF for ratio: (IF_num - CATE * IF_denom) / denom
+  IF_cate <- (IF_numerator - cate * IF_denominator) / denominator
   
-  n <- nrow(data)
-  var_late <- var(IF_late) / n
-  se_late <- sqrt(var_late)
-  ci_lower <- late - qnorm(0.975) * se_late
-  ci_upper <- late + qnorm(0.975) * se_late
+  var_cate <- var(IF_cate) / n
+  se_cate <- sqrt(var_cate)
+  ci_lower <- cate - qnorm(0.975) * se_cate
+  ci_upper <- cate + qnorm(0.975) * se_cate
   
   ### return results
-  return(list(LATE = late,
-              SE = se_late,
+  return(list(CATE = cate,
+              SE = se_cate,
               CI = c(lower = ci_lower,upper = ci_upper),
               numerator = numerator,
               denominator = denominator,
               numerator_se = results_numerator$SE,
               denominator_se = results_denominator$SE,
-              IF = IF_late,
+              IF = IF_cate,
               IF_numerator = IF_numerator,
               IF_denominator = IF_denominator))
 }
@@ -366,15 +529,16 @@ generate_stroke_data_iv <- function(n = 1000,
 
 
 # Run a single simulation iteration for IV analysis
+# Note: expects fixed_covariates to exist in parent environment (set by run_simulation_study_iv)
 run_single_simulation_iv <- function(n = 1000,
                                      iv_name = "Z",
                                      exposure_name = "rehabIRF",
                                      trunc_level = 0.001,
                                      iv_strength = 0.5,
-                                     fixed_covariates = NULL,
-                                     return_vectors = TRUE) {
+                                     crossFit = FALSE,
+                                     n_folds = 5) {
   
-  # generate data with IV (using fixed covariates if provided)
+  # generate data with IV (using fixed_covariates from parent environment)
   sim_data <- generate_stroke_data_iv(n = n,
                                       iv_name = iv_name,
                                       exposure_name = exposure_name,
@@ -390,151 +554,208 @@ run_single_simulation_iv <- function(n = 1000,
   N <- nrow(data)
   data$OUT3_ADL_IADL_01 <- (data$OUT3_ADL_IADL_01 * (N - 1) + 0.5) / N
   
-  ### fit models needed for analysis
+  #########
+  ### Fit models with hardcoded formulas
+  #########
+  
   # IV propensity score model P(Z|W)
-  iv_formula <- as.formula(paste(iv_name,"~ age + stroke_severity + comorbidity"))
-  iv_model <- glm(iv_formula,data = data,family = binomial())
+  iv_mod <- glm(Z ~ age + stroke_severity + comorbidity,
+                data = data, family = binomial())
   
-  # outcome model E[Y|Z,W] for LATE numerator
-  outcome_formula_y <- as.formula(paste("OUT3_ADL_IADL_01 ~",iv_name,
-                                        "+ age + stroke_severity + comorbidity"))
-  outcome_mod_y <- betareg(outcome_formula_y,data = data)
+  # Outcome model E[Y|Z,W] for CATE numerator
+  outcome_mod_y <- betareg(OUT3_ADL_IADL_01 ~ Z + age + stroke_severity + comorbidity,
+                           data = data)
   
-  # exposure model E[A|Z,W] for LATE denominator
-  outcome_formula_a <- as.formula(paste(exposure_name,"~",iv_name,
-                                        "+ age + stroke_severity + comorbidity"))
-  outcome_mod_a <- glm(outcome_formula_a,data = data,family = binomial())
+  # Exposure model E[A|Z,W] for CATE denominator
+  outcome_mod_a <- glm(rehabIRF ~ Z + age + stroke_severity + comorbidity,
+                       data = data, family = binomial())
   
-  # initial outcome model for IV-based ATE (without Z)
-  outcome_model_init <- betareg(OUT3_ADL_IADL_01 ~ age + stroke_severity + comorbidity,
-                                data = data)
+  # Initial outcome model for IV-based ATE (without Z)
+  outcome_mod_init <- betareg(OUT3_ADL_IADL_01 ~ age + stroke_severity + comorbidity,
+                              data = data)
   
-  # propensity score model for naive ATE P(A|W)
-  ps_formula_naive <- as.formula(paste(exposure_name,"~ age + stroke_severity + comorbidity"))
-  ps_model_naive <- glm(ps_formula_naive,data = data,family = binomial())
+  # Propensity score model for naive ATE P(A|W)
+  ps_mod_naive <- glm(rehabIRF ~ age + stroke_severity + comorbidity,
+                      data = data, family = binomial())
   
-  # outcome model E[Y|A,W] for naive ATE
-  outcome_formula_naive <- as.formula(paste("OUT3_ADL_IADL_01 ~",exposure_name,
-                                            "+ age + stroke_severity + comorbidity"))
-  outcome_mod_naive <- betareg(outcome_formula_naive,data = data)
+  # Outcome model E[Y|A,W] for naive ATE
+  outcome_mod_naive <- betareg(OUT3_ADL_IADL_01 ~ rehabIRF + age + stroke_severity + comorbidity,
+                               data = data)
   
-  # define formulas for ATE calculation
-  exp_model_formula <- as.formula(paste(exposure_name,"~ age + stroke_severity + comorbidity"))
+  # Formulas for IV-based ATE calculation
+  exp_model_formula <- rehabIRF ~ age + stroke_severity + comorbidity
   delta_formula <- ~ age + stroke_severity + comorbidity
   
-  ### calculate naive ATE for ADL
-  ### ignores unmeasured confounding
-  ate_adl_naive <- robustcompATE(outcome_mod = outcome_mod_naive,
-                                 ps_mod = ps_model_naive,
-                                 covariates = data,
-                                 exposure_name = exposure_name,
-                                 outcome_name = "OUT3_ADL_IADL_01",
-                                 trunc_level = trunc_level,
-                                 scale_factor = 3.0)
+  # Initialize CATE results
+  cate_adl <- NA
+  cate_se_adl <- NA
+  cate_ci_lower_adl <- NA
+  cate_ci_upper_adl <- NA
+  cate_numerator_adl <- NA
+  cate_denominator_adl <- NA
+  cate_numerator_se_adl <- NA
+  cate_denominator_se_adl <- NA
+  cate_converged <- FALSE
   
-  ### calculate LATE for ADL
-  late_adl <- calculate_late_robust(data = data,
-                                    outcome_mod_y = outcome_mod_y,
-                                    outcome_mod_a = outcome_mod_a,
-                                    iv_model = iv_model,
-                                    iv_name = iv_name,
-                                    exposure_name = exposure_name,
-                                    outcome_name_01 = "OUT3_ADL_IADL_01",
-                                    scale_factor = 3.0,
-                                    trunc_level_num = trunc_level,
-                                    trunc_level_denom = trunc_level)
+  # Initialize IV-based ATE results
+  ate_adl <- NA
+  ate_se_adl <- NA
+  ate_ci_lower_adl <- NA
+  ate_ci_upper_adl <- NA
+  ate_converged <- FALSE
   
-  ### calculate robust ATE
-  ate_adl <- calculate_ate_iv_robust(outcome_mod_init = outcome_model_init,
-                                     iv_model = iv_model,
-                                     data = data,
-                                     exp_model_formula = exp_model_formula,
-                                     delta_formula = delta_formula,
-                                     iv_name = iv_name,
-                                     exposure_name = exposure_name,
-                                     outcome_name_01 = "OUT3_ADL_IADL_01",
-                                     scale_factor = 3.0,
-                                     trunc_level = trunc_level)
+  # Initialize Naive ATE results
+  ate_naive_adl <- NA
+  ate_naive_se_adl <- NA
+  ate_naive_ci_lower_adl <- NA
+  ate_naive_ci_upper_adl <- NA
+  ate_naive_converged <- FALSE
   
-  ### extract results
-  if (return_vectors) {
-    # return full results including vectors
-    results_df <- data.frame(n = n,
-                             iv_name = iv_name,
-                             exposure_name = exposure_name,
-                             trunc_level = trunc_level,
-                             iv_strength = iv_strength,
-                             # LATE results for ADL
-                             late_adl = late_adl$LATE,
-                             late_se_adl = late_adl$SE,
-                             late_ci_lower_adl = late_adl$CI["lower"],
-                             late_ci_upper_adl = late_adl$CI["upper"],
-                             late_numerator_adl = late_adl$numerator,
-                             late_denominator_adl = late_adl$denominator,
-                             late_numerator_se_adl = late_adl$numerator_se,
-                             late_denominator_se_adl = late_adl$denominator_se,
-                             # ATE results for ADL
-                             ate_adl = ate_adl$ATE,
-                             ate_se_adl = ate_adl$SE,
-                             ate_ci_lower_adl = ate_adl$CI["lower"],
-                             ate_ci_upper_adl = ate_adl$CI["upper"],
-                             # Naive ATE results for ADL
-                             ate_naive_adl = ate_adl_naive$ATE,
-                             ate_naive_se_adl = ate_adl_naive$SE,
-                             ate_naive_ci_lower_adl = ate_adl_naive$CI["lower"],
-                             ate_naive_ci_upper_adl = ate_adl_naive$CI["upper"],
-                             # true values
-                             true_ate_adl = sim_data$true_ate_adl)
+  ### Calculate CATE for ADL
+  tryCatch({
+    results_cate <- calculate_cate_robust(data = data,
+                                          outcome_mod_y = outcome_mod_y,
+                                          outcome_mod_a = outcome_mod_a,
+                                          iv_model = iv_mod,
+                                          iv_name = iv_name,
+                                          exposure_name = exposure_name,
+                                          outcome_name_01 = "OUT3_ADL_IADL_01",
+                                          scale_factor = 3.0,
+                                          trunc_level_num = trunc_level,
+                                          trunc_level_denom = trunc_level,
+                                          crossFit = crossFit,
+                                          n_folds = n_folds)
     
-    # add vector results as separate list elements
-    results_df$ate_vals_adl <- list(ate_adl$ITE)
-    results_df$delta_D_X <- list(ate_adl$delta_D_X)
-    results_df$ate_naive_vals_adl <- list(ate_adl_naive$ITE)
+    cate_adl <- results_cate$CATE
+    cate_se_adl <- results_cate$SE
+    cate_ci_lower_adl <- results_cate$CI["lower"]
+    cate_ci_upper_adl <- results_cate$CI["upper"]
+    cate_numerator_adl <- results_cate$numerator
+    cate_denominator_adl <- results_cate$denominator
+    cate_numerator_se_adl <- results_cate$numerator_se
+    cate_denominator_se_adl <- results_cate$denominator_se
+    cate_converged <- TRUE
     
+  }, error = function(e) {
+    warning(paste("CATE estimation failed:", e$message))
+  })
+  
+  ### Calculate IV-based ATE for ADL
+  tryCatch({
+    results_ate <- calculate_ate_iv_robust(outcome_mod_init = outcome_mod_init,
+                                           iv_model = iv_mod,
+                                           data = data,
+                                           exp_model_formula = exp_model_formula,
+                                           delta_formula = delta_formula,
+                                           iv_name = iv_name,
+                                           exposure_name = exposure_name,
+                                           outcome_name_01 = "OUT3_ADL_IADL_01",
+                                           scale_factor = 3.0,
+                                           trunc_level = trunc_level)
+    
+    ate_adl <- results_ate$ATE
+    ate_se_adl <- results_ate$SE
+    ate_ci_lower_adl <- results_ate$CI["lower"]
+    ate_ci_upper_adl <- results_ate$CI["upper"]
+    ate_converged <- TRUE
+    
+  }, error = function(e) {
+    warning(paste("IV-based ATE estimation failed:", e$message))
+  })
+  
+  ### Calculate naive ATE for ADL (ignores unmeasured confounding)
+  tryCatch({
+    results_ate_naive <- robustcompATE(outcome_mod = outcome_mod_naive,
+                                       ps_mod = ps_mod_naive,
+                                       covariates = data,
+                                       exposure_name = exposure_name,
+                                       outcome_name = "OUT3_ADL_IADL_01",
+                                       trunc_level = trunc_level,
+                                       scale_factor = 3.0,
+                                       crossFit = crossFit,
+                                       n_folds = n_folds)
+    
+    ate_naive_adl <- results_ate_naive$ATE
+    ate_naive_se_adl <- results_ate_naive$SE
+    ate_naive_ci_lower_adl <- results_ate_naive$CI["lower"]
+    ate_naive_ci_upper_adl <- results_ate_naive$CI["upper"]
+    ate_naive_converged <- TRUE
+    
+  }, error = function(e) {
+    warning(paste("Naive ATE estimation failed:", e$message))
+  })
+  
+  ### Calculate bias and coverage
+  # CATE bias and coverage
+  if (cate_converged && !is.na(cate_adl) && is.finite(cate_adl)) {
+    cate_bias <- cate_adl - sim_data$true_ate_adl
+    cate_covers <- (cate_ci_lower_adl <= sim_data$true_ate_adl) & 
+      (sim_data$true_ate_adl <= cate_ci_upper_adl)
   } else {
-    # return only scalar results to combine across simulations
-    results_df <- data.frame(n = n,
-                             iv_name = iv_name,
-                             exposure_name = exposure_name,
-                             trunc_level = trunc_level,
-                             iv_strength = iv_strength,
-                             # LATE results for ADL
-                             late_adl = late_adl$LATE,
-                             late_se_adl = late_adl$SE,
-                             late_ci_lower_adl = late_adl$CI["lower"],
-                             late_ci_upper_adl = late_adl$CI["upper"],
-                             late_numerator_adl = late_adl$numerator,
-                             late_denominator_adl = late_adl$denominator,
-                             late_numerator_se_adl = late_adl$numerator_se,
-                             late_denominator_se_adl = late_adl$denominator_se,
-                             # ATE results for ADL
-                             ate_adl = ate_adl$ATE,
-                             ate_se_adl = ate_adl$SE,
-                             ate_ci_lower_adl = ate_adl$CI["lower"],
-                             ate_ci_upper_adl = ate_adl$CI["upper"],
-                             # Naive ATE results for ADL
-                             ate_naive_adl = ate_adl_naive$ATE,
-                             ate_naive_se_adl = ate_adl_naive$SE,
-                             ate_naive_ci_lower_adl = ate_adl_naive$CI["lower"],
-                             ate_naive_ci_upper_adl = ate_adl_naive$CI["upper"],
-                             # true values
-                             true_ate_adl = sim_data$true_ate_adl)
-    
-    # optionally add summary statistics of the vectors
-    results_df$ate_vals_adl_mean <- mean(ate_adl$ITE)
-    results_df$ate_vals_adl_sd <- sd(ate_adl$ITE)
-    results_df$ate_vals_adl_min <- min(ate_adl$ITE)
-    results_df$ate_vals_adl_max <- max(ate_adl$ITE)
-    results_df$delta_D_X_mean <- mean(ate_adl$delta_D_X)
-    results_df$delta_D_X_sd <- sd(ate_adl$delta_D_X)
-    # naive ATE summary statistics
-    results_df$ate_naive_vals_adl_mean <- mean(ate_adl_naive$ITE)
-    results_df$ate_naive_vals_adl_sd <- sd(ate_adl_naive$ITE)
-    results_df$ate_naive_vals_adl_min <- min(ate_adl_naive$ITE)
-    results_df$ate_naive_vals_adl_max <- max(ate_adl_naive$ITE)
+    cate_bias <- NA
+    cate_covers <- NA
   }
   
-  return(results_df)
+  # IV-based ATE bias and coverage
+  if (ate_converged && !is.na(ate_adl) && is.finite(ate_adl)) {
+    ate_bias <- ate_adl - sim_data$true_ate_adl
+    ate_covers <- (ate_ci_lower_adl <= sim_data$true_ate_adl) & 
+      (sim_data$true_ate_adl <= ate_ci_upper_adl)
+  } else {
+    ate_bias <- NA
+    ate_covers <- NA
+  }
+  
+  # Naive ATE bias and coverage
+  if (ate_naive_converged && !is.na(ate_naive_adl) && is.finite(ate_naive_adl)) {
+    ate_naive_bias <- ate_naive_adl - sim_data$true_ate_adl
+    ate_naive_covers <- (ate_naive_ci_lower_adl <= sim_data$true_ate_adl) & 
+      (sim_data$true_ate_adl <= ate_naive_ci_upper_adl)
+  } else {
+    ate_naive_bias <- NA
+    ate_naive_covers <- NA
+  }
+  
+  ### Return results
+  data.frame(n = n,
+             iv_name = iv_name,
+             exposure_name = exposure_name,
+             trunc_level = trunc_level,
+             iv_strength = iv_strength,
+             crossFit = crossFit,
+             # CATE results for ADL
+             cate_adl = cate_adl,
+             cate_se_adl = cate_se_adl,
+             cate_ci_lower_adl = cate_ci_lower_adl,
+             cate_ci_upper_adl = cate_ci_upper_adl,
+             cate_bias = cate_bias,
+             cate_covers = cate_covers,
+             cate_converged = cate_converged,
+             cate_numerator_adl = cate_numerator_adl,
+             cate_denominator_adl = cate_denominator_adl,
+             cate_numerator_se_adl = cate_numerator_se_adl,
+             cate_denominator_se_adl = cate_denominator_se_adl,
+             # IV-based ATE results for ADL
+             ate_adl = ate_adl,
+             ate_se_adl = ate_se_adl,
+             ate_ci_lower_adl = ate_ci_lower_adl,
+             ate_ci_upper_adl = ate_ci_upper_adl,
+             ate_bias = ate_bias,
+             ate_covers = ate_covers,
+             ate_converged = ate_converged,
+             # Naive ATE results for ADL
+             ate_naive_adl = ate_naive_adl,
+             ate_naive_se_adl = ate_naive_se_adl,
+             ate_naive_ci_lower_adl = ate_naive_ci_lower_adl,
+             ate_naive_ci_upper_adl = ate_naive_ci_upper_adl,
+             ate_naive_bias = ate_naive_bias,
+             ate_naive_covers = ate_naive_covers,
+             ate_naive_converged = ate_naive_converged,
+             # True values
+             true_ate_adl = sim_data$true_ate_adl,
+             # Proportions
+             prop_IV = mean(data[[iv_name]]),
+             prop_exposure = mean(data[[exposure_name]]))
 }
 
 
@@ -543,18 +764,16 @@ run_simulation_study_iv <- function(n_sims = 500,n = 1000,
                                     iv_name = "Z",
                                     exposure_name = "rehabIRF",
                                     trunc_level = 0.001,iv_strength = 0.5,
-                                    use_fixed_covariates = TRUE) {
+                                    crossFit = FALSE,n_folds = 5) {
   
-  # generate fixed covariates once if requested
-  fixed_covariates <- NULL
-  if (use_fixed_covariates) {
-    # generate covariates once
-    initial_data <- generate_stroke_data_iv(n = n,
-                                            iv_name = iv_name,
-                                            exposure_name = exposure_name,
-                                            iv_strength = iv_strength)
-    fixed_covariates <- initial_data$fixed_covariates
-  }
+  # Generate fixed covariates once and assign to parent environment
+  initial_data <- generate_stroke_data_iv(n = n,
+                                          iv_name = iv_name,
+                                          exposure_name = exposure_name,
+                                          iv_strength = iv_strength)
+  # assign covariates to parent environment
+  # considerably faster than passing as an argument for each simulation
+  fixed_covariates <<- initial_data$fixed_covariates
   
   # initialize results list
   results_list <- vector("list",n_sims)
@@ -570,8 +789,8 @@ run_simulation_study_iv <- function(n_sims = 500,n = 1000,
                                exposure_name = exposure_name,
                                trunc_level = trunc_level,
                                iv_strength = iv_strength,
-                               fixed_covariates = fixed_covariates,
-                               return_vectors = FALSE)
+                               crossFit = crossFit,
+                               n_folds = n_folds)
     },error = function(e) {
       cat(paste("\nError in simulation",i,":",e$message,"\n"))
       return(NULL)
@@ -585,79 +804,60 @@ run_simulation_study_iv <- function(n_sims = 500,n = 1000,
   results_list <- results_list[!sapply(results_list,is.null)]
   results <- do.call(rbind,results_list)
   
-  # calculate simulation performance metrics for LATE
-  results$late_bias_adl <- results$late_adl - results$true_ate_adl
-  
-  # calculate LATE coverage (now available from function output)
-  results$late_coverage_adl <- (results$late_ci_lower_adl <= results$true_ate_adl) & 
-    (results$late_ci_upper_adl >= results$true_ate_adl)
-  
-  # calculate simulation performance metrics for ATE (IV-based)
-  results$ate_bias_adl <- results$ate_adl - results$true_ate_adl
-  
-  # calculate coverage for ATE (IV-based) - now using CI from function
-  results$ate_coverage_adl <- (results$ate_ci_lower_adl <= results$true_ate_adl) & 
-    (results$ate_ci_upper_adl >= results$true_ate_adl)
-  
-  # calculate simulation performance metrics for naive ATE
-  results$ate_naive_bias_adl <- results$ate_naive_adl - results$true_ate_adl
-  
-  # calculate coverage for naive ATE - now using CI from function
-  results$ate_naive_coverage_adl <- (results$ate_naive_ci_lower_adl <= results$true_ate_adl) & 
-    (results$ate_naive_ci_upper_adl >= results$true_ate_adl)
-  
   return(results)
 }
 
 
-# Summarize IV simulation results for LATE,ATE,and naive ATE
+# Summarize IV simulation results for CATE, ATE, and naive ATE
 summarize_simulation_iv <- function(results) {
   
   # naive ATE summary statistics
-  ate_naive_summary <- list(mean_estimate = mean(results$ate_naive_adl),
-                            mean_bias = mean(results$ate_naive_bias_adl),
-                            mean_se = mean(results$ate_naive_se_adl),
-                            empirical_se = sd(results$ate_naive_adl),
-                            coverage = mean(results$ate_naive_coverage_adl))
+  ate_naive_summary <- list(mean_estimate = mean(results$ate_naive_adl,na.rm = TRUE),
+                            mean_bias = mean(results$ate_naive_bias,na.rm = TRUE),
+                            mean_se = mean(results$ate_naive_se_adl,na.rm = TRUE),
+                            empirical_se = sd(results$ate_naive_adl,na.rm = TRUE),
+                            coverage = mean(results$ate_naive_covers,na.rm = TRUE),
+                            convergence_rate = mean(results$ate_naive_converged,na.rm = TRUE))
   
-  # LATE summary statistics
-  late_summary <- list(mean_estimate = mean(results$late_adl),
-                       mean_bias = mean(results$late_bias_adl),
-                       mean_se = mean(results$late_se_adl),
-                       empirical_se = sd(results$late_adl),
-                       coverage = mean(results$late_coverage_adl),
-                       mean_numerator = mean(results$late_numerator_adl),
-                       mean_denominator = mean(results$late_denominator_adl),
-                       mean_numerator_se = mean(results$late_numerator_se_adl),
-                       mean_denominator_se = mean(results$late_denominator_se_adl))
+  # CATE summary statistics
+  cate_summary <- list(mean_estimate = mean(results$cate_adl,na.rm = TRUE),
+                       mean_bias = mean(results$cate_bias,na.rm = TRUE),
+                       mean_se = mean(results$cate_se_adl,na.rm = TRUE),
+                       empirical_se = sd(results$cate_adl,na.rm = TRUE),
+                       coverage = mean(results$cate_covers,na.rm = TRUE),
+                       convergence_rate = mean(results$cate_converged,na.rm = TRUE),
+                       mean_numerator = mean(results$cate_numerator_adl,na.rm = TRUE),
+                       mean_denominator = mean(results$cate_denominator_adl,na.rm = TRUE),
+                       mean_numerator_se = mean(results$cate_numerator_se_adl,na.rm = TRUE),
+                       mean_denominator_se = mean(results$cate_denominator_se_adl,na.rm = TRUE))
   
-  # ATE summary statistics
-  ate_summary <- list(mean_estimate = mean(results$ate_adl),
-                      mean_bias = mean(results$ate_bias_adl),
-                      mean_se = mean(results$ate_se_adl),
-                      empirical_se = sd(results$ate_adl),
-                      coverage = mean(results$ate_coverage_adl),
-                      mean_delta_D = mean(results$mean_delta_D_adl),
-                      mean_delta_X = mean(results$mean_delta_X_adl))
+  # ATE (IV-based) summary statistics
+  ate_summary <- list(mean_estimate = mean(results$ate_adl,na.rm = TRUE),
+                      mean_bias = mean(results$ate_bias,na.rm = TRUE),
+                      mean_se = mean(results$ate_se_adl,na.rm = TRUE),
+                      empirical_se = sd(results$ate_adl,na.rm = TRUE),
+                      coverage = mean(results$ate_covers,na.rm = TRUE),
+                      convergence_rate = mean(results$ate_converged,na.rm = TRUE))
   
   # IV diagnostics
-  iv_diagnostics <- list(mean_first_stage_strength = mean(results$first_stage_strength),
-                         sd_first_stage_strength = sd(results$first_stage_strength),
-                         mean_prop_IV1 = mean(results$prop_IV1),
-                         mean_prop_treated = mean(results$prop_treated),
+  iv_diagnostics <- list(mean_prop_IV = mean(results$prop_IV,na.rm = TRUE),
+                         mean_prop_exposure = mean(results$prop_exposure,na.rm = TRUE),
                          iv_strength_setting = results$iv_strength[1],
                          iv_name = results$iv_name[1],
-                         exposure_name = results$exposure_name[1])
+                         exposure_name = results$exposure_name[1],
+                         # First stage strength from CATE denominator
+                         mean_first_stage = mean(results$cate_denominator_adl,na.rm = TRUE))
   
   # true values should be constant across simulations
-  true_values <- list(true_ate_adl = mean(results$true_ate_adl))
+  true_values <- list(true_ate_adl = mean(results$true_ate_adl,na.rm = TRUE))
   
   summary_stats <- list(ATE_naive = ate_naive_summary,
-                        LATE = late_summary,
+                        CATE = cate_summary,
                         ATE = ate_summary,
                         IV_diagnostics = iv_diagnostics,
                         true_values = true_values,
-                        n_simulations = nrow(results))
+                        n_simulations = nrow(results),
+                        n = results$n[1])
   
   return(summary_stats)
 }
@@ -669,45 +869,59 @@ print_simulation_summary_iv <- function(summary_stats) {
   cat("\n")
   cat("IV SIMULATION RESULTS\n")
   cat("=====================\n")
-  cat(sprintf("N simulations: %d | True ATE: %.4f | IV strength: %.2f | First stage: %.4f\n",
+  cat(sprintf("N simulations: %d | n: %d | True ATE: %.4f\n",
               summary_stats$n_simulations,
-              summary_stats$true_values$true_ate_adl,
+              summary_stats$n,
+              summary_stats$true_values$true_ate_adl))
+  cat(sprintf("IV strength: %.2f | First stage (CATE denom): %.4f\n",
               summary_stats$IV_diagnostics$iv_strength_setting,
-              summary_stats$IV_diagnostics$mean_first_stage_strength))
+              summary_stats$IV_diagnostics$mean_first_stage))
   cat(sprintf("IV: '%s' | Exposure: '%s'\n",
               summary_stats$IV_diagnostics$iv_name,
               summary_stats$IV_diagnostics$exposure_name))
   cat(sprintf("P(IV=1): %.3f | P(Treated): %.3f\n\n",
-              summary_stats$IV_diagnostics$mean_prop_IV1,
-              summary_stats$IV_diagnostics$mean_prop_treated))
+              summary_stats$IV_diagnostics$mean_prop_IV,
+              summary_stats$IV_diagnostics$mean_prop_exposure))
   
   # Create results table with model-based SE
-  cat("Method      Est      Bias     Model_SE Emp_SE   Coverage\n")
-  cat("----------  -------  -------  -------- -------  --------\n")
+  cat("Method      Est      Bias     Model_SE Emp_SE   Coverage Conv\n")
+  cat("----------  -------  -------  -------- -------  -------- ----\n")
   
   # Naive ATE results
-  cat(sprintf("ATE (Naive) %.4f   %.4f   %.4f   %.4f   %.3f\n",
+  cat(sprintf("ATE (Naive) %7.4f  %7.4f  %7.4f  %7.4f  %7.3f  %.2f\n",
               summary_stats$ATE_naive$mean_estimate,
               summary_stats$ATE_naive$mean_bias,
               summary_stats$ATE_naive$mean_se,
               summary_stats$ATE_naive$empirical_se,
-              summary_stats$ATE_naive$coverage))
+              summary_stats$ATE_naive$coverage,
+              summary_stats$ATE_naive$convergence_rate))
   
-  # LATE results
-  cat(sprintf("LATE        %.4f   %.4f   %.4f   %.4f   %.3f\n",
-              summary_stats$LATE$mean_estimate,
-              summary_stats$LATE$mean_bias,
-              summary_stats$LATE$mean_se,
-              summary_stats$LATE$empirical_se,
-              summary_stats$LATE$coverage))
+  # CATE results
+  cat(sprintf("CATE        %7.4f  %7.4f  %7.4f  %7.4f  %7.3f  %.2f\n",
+              summary_stats$CATE$mean_estimate,
+              summary_stats$CATE$mean_bias,
+              summary_stats$CATE$mean_se,
+              summary_stats$CATE$empirical_se,
+              summary_stats$CATE$coverage,
+              summary_stats$CATE$convergence_rate))
   
-  # ATE results
-  cat(sprintf("ATE (IV)    %.4f   %.4f   %.4f   %.4f   %.3f\n",
+  # ATE (IV) results
+  cat(sprintf("ATE (IV)    %7.4f  %7.4f  %7.4f  %7.4f  %7.3f  %.2f\n",
               summary_stats$ATE$mean_estimate,
               summary_stats$ATE$mean_bias,
               summary_stats$ATE$mean_se,
               summary_stats$ATE$empirical_se,
-              summary_stats$ATE$coverage))
+              summary_stats$ATE$coverage,
+              summary_stats$ATE$convergence_rate))
+  
+  # CATE components
+  cat("\nCATE Components:\n")
+  cat(sprintf("  Numerator (ITT on Y):   %.4f (SE: %.4f)\n",
+              summary_stats$CATE$mean_numerator,
+              summary_stats$CATE$mean_numerator_se))
+  cat(sprintf("  Denominator (ITT on A): %.4f (SE: %.4f)\n",
+              summary_stats$CATE$mean_denominator,
+              summary_stats$CATE$mean_denominator_se))
   
   cat("\n")
 }
@@ -715,22 +929,28 @@ print_simulation_summary_iv <- function(summary_stats) {
 
 
 # number of sims
-N_SIMS <- 800
-# set.seed(80924)
+N_SIMS <- 1000
 
 # run simulation study with N = 1500
 sim_results <- run_simulation_study_iv(n_sims = N_SIMS,n = 1500,
                                        trunc_level = 0.001,iv_strength = 0.4,
-                                       use_fixed_covariates = TRUE)
+                                       crossFit = FALSE)
 
 # summarize and print
 sim_summary <- summarize_simulation_iv(sim_results)
 print_simulation_summary_iv(sim_summary)
 
-# run simulation study with N = 8000
-sim_results <- run_simulation_study_iv(n_sims = N_SIMS,n = 8000,
+
+
+
+
+# number of sims
+N_SIMS <- 100
+
+# run simulation study with N = 1500
+sim_results <- run_simulation_study_iv(n_sims = N_SIMS,n = 1500,
                                        trunc_level = 0.001,iv_strength = 0.4,
-                                       use_fixed_covariates = FALSE)
+                                       crossFit = TRUE)
 
 # summarize and print
 sim_summary <- summarize_simulation_iv(sim_results)
