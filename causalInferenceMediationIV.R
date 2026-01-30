@@ -810,6 +810,7 @@ robustTheta_reduced_form <- function(outcome_mod,mediator_mod,iv_mod,ps_mod,cova
 # Calculates the complier interventional indirect and direct effects
 # IIE = (theta(1,1) - theta(1,0)) / first_stage
 # IDE = (theta(1,1) - theta(0,0)) - IIE = TE_reduced - IIE
+# IDE_alt = (theta(1,0) - theta(0,0)) / first_stage
 robustcompCMA_IV <- function(outcome_mod, mediator_mod, mediator_mod_with_iv,
                              iv_mod, ps_mod, covariates,
                              exposure_name, mediator_name, iv_name, outcome_name,
@@ -904,12 +905,19 @@ robustcompCMA_IV <- function(outcome_mod, mediator_mod, mediator_mod_with_iv,
   te_reduced <- theta_11$theta - theta_00$theta
   IF_te_reduced <- theta_11$IF - theta_00$IF
   
+  # IDE_reduced = theta(1,0) - theta(0,0) (for alternative IDE estimator)
+  ide_reduced <- theta_10$theta - theta_00$theta
+  IF_ide_reduced <- theta_10$IF - theta_00$IF
+  
   ### Standard errors for reduced form estimates
   var_iie_reduced <- var(IF_iie_reduced) / n
   se_iie_reduced <- sqrt(var_iie_reduced)
   
   var_te_reduced <- var(IF_te_reduced) / n
   se_te_reduced <- sqrt(var_te_reduced)
+  
+  var_ide_reduced <- var(IF_ide_reduced) / n
+  se_ide_reduced <- sqrt(var_ide_reduced)
   
   ### Calculate IIE = IIE_reduced / first_stage
   FS <- first_stage$ATE
@@ -925,7 +933,7 @@ robustcompCMA_IV <- function(outcome_mod, mediator_mod, mediator_mod_with_iv,
   ci_lower_iie <- iie_iv - qnorm(0.975) * se_iie
   ci_upper_iie <- iie_iv + qnorm(0.975) * se_iie
   
-  ### Calculate IDE = TE_reduced - IIE
+  ### Calculate IDE = TE_reduced - IIE (original estimator)
   ide_iv <- te_reduced - iie_iv
   
   # Delta method IF for IDE = IF_TE_reduced - IF_IIE
@@ -937,40 +945,63 @@ robustcompCMA_IV <- function(outcome_mod, mediator_mod, mediator_mod_with_iv,
   ci_lower_ide <- ide_iv - qnorm(0.975) * se_ide
   ci_upper_ide <- ide_iv + qnorm(0.975) * se_ide
   
-  return(list(theta_11 = theta_11$theta,
-              theta_10 = theta_10$theta,
-              theta_00 = theta_00$theta,
-              theta_11_SE = theta_11$SE,
-              theta_10_SE = theta_10$SE,
-              theta_00_SE = theta_00$SE,
-              theta_11_CI = theta_11$CI,
-              theta_10_CI = theta_10$CI,
-              theta_00_CI = theta_00$CI,
-              IF_theta_11 = theta_11$IF,
-              IF_theta_10 = theta_10$IF,
-              IF_theta_00 = theta_00$IF,
-              # Reduced form estimates
-              IIE_reduced = iie_reduced,
-              IIE_reduced_SE = se_iie_reduced,
-              TE_reduced = te_reduced,
-              TE_reduced_SE = se_te_reduced,
-              IF_IIE_reduced = IF_iie_reduced,
-              IF_TE_reduced = IF_te_reduced,
-              # First stage
-              first_stage = FS,
-              first_stage_SE = first_stage$SE,
-              first_stage_CI = first_stage$CI,
-              IF_first_stage = IF_FS,
-              # IIE (IV-adjusted)
-              IIE = iie_iv,
-              IIE_SE = se_iie,
-              IIE_CI = c(lower = ci_lower_iie, upper = ci_upper_iie),
-              IF_IIE = IF_iie,
-              # IDE (IV-adjusted)
-              IDE = ide_iv,
-              IDE_SE = se_ide,
-              IDE_CI = c(lower = ci_lower_ide, upper = ci_upper_ide),
-              IF_IDE = IF_ide))
+  ### Calculate IDE_alt = IDE_reduced / first_stage (alternative estimator)
+  ide_alt_iv <- ide_reduced / FS
+  
+  # Delta method IF for IDE_alt
+  IF_ide_alt <- (IF_ide_reduced - ide_alt_iv * IF_FS) / FS
+  
+  # Standard error and CI for IDE_alt
+  var_ide_alt <- var(IF_ide_alt) / n
+  se_ide_alt <- sqrt(var_ide_alt)
+  ci_lower_ide_alt <- ide_alt_iv - qnorm(0.975) * se_ide_alt
+  ci_upper_ide_alt <- ide_alt_iv + qnorm(0.975) * se_ide_alt
+  
+  return(list(
+    # Theta estimates
+    theta_11 = theta_11$theta,
+    theta_10 = theta_10$theta,
+    theta_00 = theta_00$theta,
+    theta_11_SE = theta_11$SE,
+    theta_10_SE = theta_10$SE,
+    theta_00_SE = theta_00$SE,
+    theta_11_CI = theta_11$CI,
+    theta_10_CI = theta_10$CI,
+    theta_00_CI = theta_00$CI,
+    IF_theta_11 = theta_11$IF,
+    IF_theta_10 = theta_10$IF,
+    IF_theta_00 = theta_00$IF,
+    # Reduced form estimates
+    IIE_reduced = iie_reduced,
+    IIE_reduced_SE = se_iie_reduced,
+    TE_reduced = te_reduced,
+    TE_reduced_SE = se_te_reduced,
+    IDE_reduced = ide_reduced,
+    IDE_reduced_SE = se_ide_reduced,
+    IF_IIE_reduced = IF_iie_reduced,
+    IF_TE_reduced = IF_te_reduced,
+    IF_IDE_reduced = IF_ide_reduced,
+    # First stage
+    first_stage = FS,
+    first_stage_SE = first_stage$SE,
+    first_stage_CI = first_stage$CI,
+    IF_first_stage = IF_FS,
+    # IIE (IV-adjusted)
+    IIE = iie_iv,
+    IIE_SE = se_iie,
+    IIE_CI = c(lower = ci_lower_iie, upper = ci_upper_iie),
+    IF_IIE = IF_iie,
+    # IDE (IV-adjusted, original: TE_reduced - IIE)
+    IDE = ide_iv,
+    IDE_SE = se_ide,
+    IDE_CI = c(lower = ci_lower_ide, upper = ci_upper_ide),
+    IF_IDE = IF_ide,
+    # IDE_alt (IV-adjusted, alternative: IDE_reduced / FS)
+    IDE_alt = ide_alt_iv,
+    IDE_alt_SE = se_ide_alt,
+    IDE_alt_CI = c(lower = ci_lower_ide_alt, upper = ci_upper_ide_alt),
+    IF_IDE_alt = IF_ide_alt
+  ))
 }
 
 
@@ -1284,8 +1315,10 @@ run_single_simulation_iv_mediation <- function(n = 1000,
   # Initialize IV-based results
   iie_adl <- NA; iie_se_adl <- NA; iie_ci_lower_adl <- NA; iie_ci_upper_adl <- NA
   ide_adl <- NA; ide_se_adl <- NA; ide_ci_lower_adl <- NA; ide_ci_upper_adl <- NA
+  ide_alt_adl <- NA; ide_alt_se_adl <- NA; ide_alt_ci_lower_adl <- NA; ide_alt_ci_upper_adl <- NA
   iie_reduced <- NA; iie_reduced_se <- NA
   te_reduced <- NA; te_reduced_se <- NA
+  ide_reduced <- NA; ide_reduced_se <- NA
   first_stage_est <- NA; first_stage_se <- NA; first_stage_ci_lower <- NA; first_stage_ci_upper <- NA
   theta_11 <- NA; theta_11_se <- NA
   theta_10 <- NA; theta_10_se <- NA
@@ -1300,18 +1333,18 @@ run_single_simulation_iv_mediation <- function(n = 1000,
   
   ### Fit models
   ps_mod <- glm(insured ~ age+stroke_severity+comorbidity,
-                data = data,family = binomial())
+                data = data, family = binomial())
   
   mediator_mod <- glm(rehabIRF ~ age+stroke_severity+comorbidity
                       +insured*(age+stroke_severity+comorbidity),
-                      data = data,family = binomial())
+                      data = data, family = binomial())
   
   mediator_mod_with_iv <- glm(rehabIRF ~ age+stroke_severity+comorbidity
                               +insured*(Z+age+stroke_severity+comorbidity),
-                              data = data,family = binomial())
+                              data = data, family = binomial())
   
   iv_mod <- glm(Z ~ age+stroke_severity+comorbidity,
-                data = data,family = binomial())
+                data = data, family = binomial())
   
   outcome_mod <- betareg(OUT3_ADL_IADL_01 ~ age+stroke_severity+comorbidity
                          +insured*(Z+age+stroke_severity+comorbidity),
@@ -1355,6 +1388,14 @@ run_single_simulation_iv_mediation <- function(n = 1000,
     te_reduced <- results_cma$TE_reduced
     te_reduced_se <- results_cma$TE_reduced_SE
     
+    # Extract IDE_alt results
+    ide_alt_adl <- results_cma$IDE_alt
+    ide_alt_se_adl <- results_cma$IDE_alt_SE
+    ide_alt_ci_lower_adl <- results_cma$IDE_alt_CI["lower"]
+    ide_alt_ci_upper_adl <- results_cma$IDE_alt_CI["upper"]
+    ide_reduced <- results_cma$IDE_reduced
+    ide_reduced_se <- results_cma$IDE_reduced_SE
+    
     # Extract first stage results
     first_stage_est <- results_cma$first_stage
     first_stage_se <- results_cma$first_stage_SE
@@ -1371,8 +1412,8 @@ run_single_simulation_iv_mediation <- function(n = 1000,
     
     cma_converged <- TRUE
     
-  },error = function(e) {
-    warning(paste("CMA estimation failed:",e$message))
+  }, error = function(e) {
+    warning(paste("CMA estimation failed:", e$message))
   })
   
   ### Calculate naive NIE
@@ -1393,8 +1434,8 @@ run_single_simulation_iv_mediation <- function(n = 1000,
     naive_nie_ci_upper_adl <- results_naive_nie$CI["upper"]
     naive_nie_converged <- TRUE
     
-  },error = function(e) {
-    warning(paste("Naive NIE estimation failed:",e$message))
+  }, error = function(e) {
+    warning(paste("Naive NIE estimation failed:", e$message))
   })
   
   ### Calculate naive NDE
@@ -1415,76 +1456,87 @@ run_single_simulation_iv_mediation <- function(n = 1000,
     naive_nde_ci_upper_adl <- results_naive_nde$CI["upper"]
     naive_nde_converged <- TRUE
     
-  },error = function(e) {
-    warning(paste("Naive NDE estimation failed:",e$message))
+  }, error = function(e) {
+    warning(paste("Naive NDE estimation failed:", e$message))
   })
   
   # Calculate bias and coverage for IIE
   iie_bias <- ifelse(cma_converged && !is.na(iie_adl) && is.finite(iie_adl),
-                     iie_adl - sim_data$true_nie,NA)
+                     iie_adl - sim_data$true_nie, NA)
   iie_covers <- ifelse(cma_converged && !is.na(iie_adl) && is.finite(iie_adl),
-                       (iie_ci_lower_adl <= sim_data$true_nie) & (sim_data$true_nie <= iie_ci_upper_adl),NA)
+                       (iie_ci_lower_adl <= sim_data$true_nie) & (sim_data$true_nie <= iie_ci_upper_adl), NA)
   
   # Calculate bias and coverage for IDE
   ide_bias <- ifelse(cma_converged && !is.na(ide_adl) && is.finite(ide_adl),
-                     ide_adl - sim_data$true_nde,NA)
+                     ide_adl - sim_data$true_nde, NA)
   ide_covers <- ifelse(cma_converged && !is.na(ide_adl) && is.finite(ide_adl),
-                       (ide_ci_lower_adl <= sim_data$true_nde) & (sim_data$true_nde <= ide_ci_upper_adl),NA)
+                       (ide_ci_lower_adl <= sim_data$true_nde) & (sim_data$true_nde <= ide_ci_upper_adl), NA)
+  
+  # Calculate bias and coverage for IDE_alt
+  ide_alt_bias <- ifelse(cma_converged && !is.na(ide_alt_adl) && is.finite(ide_alt_adl),
+                         ide_alt_adl - sim_data$true_nde, NA)
+  ide_alt_covers <- ifelse(cma_converged && !is.na(ide_alt_adl) && is.finite(ide_alt_adl),
+                           (ide_alt_ci_lower_adl <= sim_data$true_nde) & (sim_data$true_nde <= ide_alt_ci_upper_adl), NA)
   
   # Calculate bias and coverage for first stage
   first_stage_bias <- ifelse(cma_converged && !is.na(first_stage_est) && is.finite(first_stage_est),
-                             first_stage_est - sim_data$true_first_stage,NA)
+                             first_stage_est - sim_data$true_first_stage, NA)
   first_stage_covers <- ifelse(cma_converged && !is.na(first_stage_est) && is.finite(first_stage_est),
                                (first_stage_ci_lower <= sim_data$true_first_stage) & 
-                                 (sim_data$true_first_stage <= first_stage_ci_upper),NA)
+                                 (sim_data$true_first_stage <= first_stage_ci_upper), NA)
   
   # Calculate bias and coverage for naive NIE
   naive_nie_bias <- ifelse(naive_nie_converged && !is.na(naive_nie_adl) && is.finite(naive_nie_adl),
-                           naive_nie_adl - sim_data$true_nie,NA)
+                           naive_nie_adl - sim_data$true_nie, NA)
   naive_nie_covers <- ifelse(naive_nie_converged && !is.na(naive_nie_adl) && is.finite(naive_nie_adl),
                              (naive_nie_ci_lower_adl <= sim_data$true_nie) & 
-                               (sim_data$true_nie <= naive_nie_ci_upper_adl),NA)
+                               (sim_data$true_nie <= naive_nie_ci_upper_adl), NA)
   
   # Calculate bias and coverage for naive NDE
   naive_nde_bias <- ifelse(naive_nde_converged && !is.na(naive_nde_adl) && is.finite(naive_nde_adl),
-                           naive_nde_adl - sim_data$true_nde,NA)
+                           naive_nde_adl - sim_data$true_nde, NA)
   naive_nde_covers <- ifelse(naive_nde_converged && !is.na(naive_nde_adl) && is.finite(naive_nde_adl),
                              (naive_nde_ci_lower_adl <= sim_data$true_nde) & 
-                               (sim_data$true_nde <= naive_nde_ci_upper_adl),NA)
+                               (sim_data$true_nde <= naive_nde_ci_upper_adl), NA)
   
-  data.frame(n = n,iv_strength = iv_strength,trunc_level = trunc_level,crossFit = crossFit,
+  data.frame(n = n, iv_strength = iv_strength, trunc_level = trunc_level, crossFit = crossFit,
              # IIE results
-             iie_adl = iie_adl,iie_se_adl = iie_se_adl,
-             iie_ci_lower_adl = iie_ci_lower_adl,iie_ci_upper_adl = iie_ci_upper_adl,
-             iie_bias = iie_bias,iie_covers = iie_covers,
-             iie_reduced = iie_reduced,iie_reduced_se = iie_reduced_se,
-             # IDE results
-             ide_adl = ide_adl,ide_se_adl = ide_se_adl,
-             ide_ci_lower_adl = ide_ci_lower_adl,ide_ci_upper_adl = ide_ci_upper_adl,
-             ide_bias = ide_bias,ide_covers = ide_covers,
-             te_reduced = te_reduced,te_reduced_se = te_reduced_se,
+             iie_adl = iie_adl, iie_se_adl = iie_se_adl,
+             iie_ci_lower_adl = iie_ci_lower_adl, iie_ci_upper_adl = iie_ci_upper_adl,
+             iie_bias = iie_bias, iie_covers = iie_covers,
+             iie_reduced = iie_reduced, iie_reduced_se = iie_reduced_se,
+             # IDE results (original: TE_reduced - IIE)
+             ide_adl = ide_adl, ide_se_adl = ide_se_adl,
+             ide_ci_lower_adl = ide_ci_lower_adl, ide_ci_upper_adl = ide_ci_upper_adl,
+             ide_bias = ide_bias, ide_covers = ide_covers,
+             te_reduced = te_reduced, te_reduced_se = te_reduced_se,
+             # IDE_alt results (alternative: IDE_reduced / FS)
+             ide_alt_adl = ide_alt_adl, ide_alt_se_adl = ide_alt_se_adl,
+             ide_alt_ci_lower_adl = ide_alt_ci_lower_adl, ide_alt_ci_upper_adl = ide_alt_ci_upper_adl,
+             ide_alt_bias = ide_alt_bias, ide_alt_covers = ide_alt_covers,
+             ide_reduced = ide_reduced, ide_reduced_se = ide_reduced_se,
              # Theta estimates
-             theta_11 = theta_11,theta_11_se = theta_11_se,
-             theta_10 = theta_10,theta_10_se = theta_10_se,
-             theta_00 = theta_00,theta_00_se = theta_00_se,
+             theta_11 = theta_11, theta_11_se = theta_11_se,
+             theta_10 = theta_10, theta_10_se = theta_10_se,
+             theta_00 = theta_00, theta_00_se = theta_00_se,
              # First stage
-             first_stage_est = first_stage_est,first_stage_se = first_stage_se,
-             first_stage_ci_lower = first_stage_ci_lower,first_stage_ci_upper = first_stage_ci_upper,
-             first_stage_bias = first_stage_bias,first_stage_covers = first_stage_covers,
+             first_stage_est = first_stage_est, first_stage_se = first_stage_se,
+             first_stage_ci_lower = first_stage_ci_lower, first_stage_ci_upper = first_stage_ci_upper,
+             first_stage_bias = first_stage_bias, first_stage_covers = first_stage_covers,
              # Convergence
              cma_converged = cma_converged,
              # Naive estimators
-             naive_nie_adl = naive_nie_adl,naive_nie_se_adl = naive_nie_se_adl,
-             naive_nie_ci_lower_adl = naive_nie_ci_lower_adl,naive_nie_ci_upper_adl = naive_nie_ci_upper_adl,
-             naive_nie_bias = naive_nie_bias,naive_nie_covers = naive_nie_covers,
+             naive_nie_adl = naive_nie_adl, naive_nie_se_adl = naive_nie_se_adl,
+             naive_nie_ci_lower_adl = naive_nie_ci_lower_adl, naive_nie_ci_upper_adl = naive_nie_ci_upper_adl,
+             naive_nie_bias = naive_nie_bias, naive_nie_covers = naive_nie_covers,
              naive_nie_converged = naive_nie_converged,
-             naive_nde_adl = naive_nde_adl,naive_nde_se_adl = naive_nde_se_adl,
-             naive_nde_ci_lower_adl = naive_nde_ci_lower_adl,naive_nde_ci_upper_adl = naive_nde_ci_upper_adl,
-             naive_nde_bias = naive_nde_bias,naive_nde_covers = naive_nde_covers,
+             naive_nde_adl = naive_nde_adl, naive_nde_se_adl = naive_nde_se_adl,
+             naive_nde_ci_lower_adl = naive_nde_ci_lower_adl, naive_nde_ci_upper_adl = naive_nde_ci_upper_adl,
+             naive_nde_bias = naive_nde_bias, naive_nde_covers = naive_nde_covers,
              naive_nde_converged = naive_nde_converged,
              # True values
-             true_iie_adl = sim_data$true_nie,true_ide_adl = sim_data$true_nde,
-             true_te_adl = sim_data$true_te,true_iv_ame_on_mediator = sim_data$true_iv_ame_on_mediator,
+             true_iie_adl = sim_data$true_nie, true_ide_adl = sim_data$true_nde,
+             true_te_adl = sim_data$true_te, true_iv_ame_on_mediator = sim_data$true_iv_ame_on_mediator,
              true_first_stage = sim_data$true_first_stage,
              prop_insured = mean(data[[exposure_name]]),
              prop_rehabIRF = mean(data[[mediator_name]]),
@@ -1492,12 +1544,12 @@ run_single_simulation_iv_mediation <- function(n = 1000,
 }
 
 
-run_simulation_study_iv_mediation <- function(n_sims = 100,n = 1000,
+run_simulation_study_iv_mediation <- function(n_sims = 100, n = 1000,
                                               exposure_name = "insured",
                                               mediator_name = "rehabIRF",
                                               iv_name = "Z",
-                                              crossFit = FALSE,n_folds = 5,
-                                              iv_strength = 0.3,trunc_level = 0.001) {
+                                              crossFit = FALSE, n_folds = 5,
+                                              iv_strength = 0.3, trunc_level = 0.001) {
   
   initial_data <- generate_stroke_data_iv_mediation(n = n,
                                                     exposure_name = exposure_name,
@@ -1506,8 +1558,8 @@ run_simulation_study_iv_mediation <- function(n_sims = 100,n = 1000,
                                                     iv_strength = iv_strength)
   fixed_covariates <<- initial_data$fixed_covariates
   
-  results_list <- vector("list",n_sims)
-  pb <- txtProgressBar(min = 0,max = n_sims,style = 3)
+  results_list <- vector("list", n_sims)
+  pb <- txtProgressBar(min = 0, max = n_sims, style = 3)
   
   for (i in 1:n_sims) {
     results_list[[i]] <- run_single_simulation_iv_mediation(n = n,
@@ -1518,12 +1570,12 @@ run_simulation_study_iv_mediation <- function(n_sims = 100,n = 1000,
                                                             n_folds = n_folds,
                                                             iv_strength = iv_strength,
                                                             trunc_level = trunc_level)
-    setTxtProgressBar(pb,i)
+    setTxtProgressBar(pb, i)
   }
   
   close(pb)
-  results_df <- do.call(rbind,results_list)
-  rm(fixed_covariates,envir = .GlobalEnv)
+  results_df <- do.call(rbind, results_list)
+  rm(fixed_covariates, envir = .GlobalEnv)
   
   return(results_df)
 }
@@ -1532,98 +1584,113 @@ run_simulation_study_iv_mediation <- function(n_sims = 100,n = 1000,
 summarize_simulation_iv_mediation <- function(results_df) {
   
   # IIE summary
-  iie_summary <- list(mean_estimate = mean(results_df$iie_adl,na.rm = TRUE),
-                      mean_bias = mean(results_df$iie_bias,na.rm = TRUE),
-                      mean_se = mean(results_df$iie_se_adl,na.rm = TRUE),
-                      empirical_se = sd(results_df$iie_adl,na.rm = TRUE),
-                      coverage = mean(results_df$iie_covers,na.rm = TRUE),
-                      rmse = sqrt(mean(results_df$iie_bias^2,na.rm = TRUE)),
-                      convergence_rate = sum(results_df$cma_converged,na.rm = TRUE) / nrow(results_df))
+  iie_summary <- list(mean_estimate = mean(results_df$iie_adl, na.rm = TRUE),
+                      mean_bias = mean(results_df$iie_bias, na.rm = TRUE),
+                      mean_se = mean(results_df$iie_se_adl, na.rm = TRUE),
+                      empirical_se = sd(results_df$iie_adl, na.rm = TRUE),
+                      coverage = mean(results_df$iie_covers, na.rm = TRUE),
+                      rmse = sqrt(mean(results_df$iie_bias^2, na.rm = TRUE)),
+                      convergence_rate = sum(results_df$cma_converged, na.rm = TRUE) / nrow(results_df))
   
-  # IDE summary
-  ide_summary <- list(mean_estimate = mean(results_df$ide_adl,na.rm = TRUE),
-                      mean_bias = mean(results_df$ide_bias,na.rm = TRUE),
-                      mean_se = mean(results_df$ide_se_adl,na.rm = TRUE),
-                      empirical_se = sd(results_df$ide_adl,na.rm = TRUE),
-                      coverage = mean(results_df$ide_covers,na.rm = TRUE),
-                      rmse = sqrt(mean(results_df$ide_bias^2,na.rm = TRUE)),
-                      convergence_rate = sum(results_df$cma_converged,na.rm = TRUE) / nrow(results_df))
+  # IDE summary (original: TE_reduced - IIE)
+  ide_summary <- list(mean_estimate = mean(results_df$ide_adl, na.rm = TRUE),
+                      mean_bias = mean(results_df$ide_bias, na.rm = TRUE),
+                      mean_se = mean(results_df$ide_se_adl, na.rm = TRUE),
+                      empirical_se = sd(results_df$ide_adl, na.rm = TRUE),
+                      coverage = mean(results_df$ide_covers, na.rm = TRUE),
+                      rmse = sqrt(mean(results_df$ide_bias^2, na.rm = TRUE)),
+                      convergence_rate = sum(results_df$cma_converged, na.rm = TRUE) / nrow(results_df))
+  
+  # IDE_alt summary (alternative: IDE_reduced / FS)
+  ide_alt_summary <- list(mean_estimate = mean(results_df$ide_alt_adl, na.rm = TRUE),
+                          mean_bias = mean(results_df$ide_alt_bias, na.rm = TRUE),
+                          mean_se = mean(results_df$ide_alt_se_adl, na.rm = TRUE),
+                          empirical_se = sd(results_df$ide_alt_adl, na.rm = TRUE),
+                          coverage = mean(results_df$ide_alt_covers, na.rm = TRUE),
+                          rmse = sqrt(mean(results_df$ide_alt_bias^2, na.rm = TRUE)),
+                          convergence_rate = sum(results_df$cma_converged, na.rm = TRUE) / nrow(results_df))
   
   # Theta summaries (single set - used for both IIE and IDE)
-  theta_11_summary <- list(mean_estimate = mean(results_df$theta_11,na.rm = TRUE),
-                           mean_se = mean(results_df$theta_11_se,na.rm = TRUE),
-                           empirical_se = sd(results_df$theta_11,na.rm = TRUE))
+  theta_11_summary <- list(mean_estimate = mean(results_df$theta_11, na.rm = TRUE),
+                           mean_se = mean(results_df$theta_11_se, na.rm = TRUE),
+                           empirical_se = sd(results_df$theta_11, na.rm = TRUE))
   
-  theta_10_summary <- list(mean_estimate = mean(results_df$theta_10,na.rm = TRUE),
-                           mean_se = mean(results_df$theta_10_se,na.rm = TRUE),
-                           empirical_se = sd(results_df$theta_10,na.rm = TRUE))
+  theta_10_summary <- list(mean_estimate = mean(results_df$theta_10, na.rm = TRUE),
+                           mean_se = mean(results_df$theta_10_se, na.rm = TRUE),
+                           empirical_se = sd(results_df$theta_10, na.rm = TRUE))
   
-  theta_00_summary <- list(mean_estimate = mean(results_df$theta_00,na.rm = TRUE),
-                           mean_se = mean(results_df$theta_00_se,na.rm = TRUE),
-                           empirical_se = sd(results_df$theta_00,na.rm = TRUE))
+  theta_00_summary <- list(mean_estimate = mean(results_df$theta_00, na.rm = TRUE),
+                           mean_se = mean(results_df$theta_00_se, na.rm = TRUE),
+                           empirical_se = sd(results_df$theta_00, na.rm = TRUE))
   
   # Reduced form summaries
-  iie_reduced_summary <- list(mean_estimate = mean(results_df$iie_reduced,na.rm = TRUE),
-                              mean_se = mean(results_df$iie_reduced_se,na.rm = TRUE),
-                              empirical_se = sd(results_df$iie_reduced,na.rm = TRUE))
+  iie_reduced_summary <- list(mean_estimate = mean(results_df$iie_reduced, na.rm = TRUE),
+                              mean_se = mean(results_df$iie_reduced_se, na.rm = TRUE),
+                              empirical_se = sd(results_df$iie_reduced, na.rm = TRUE))
   
-  te_reduced_summary <- list(mean_estimate = mean(results_df$te_reduced,na.rm = TRUE),
-                             mean_se = mean(results_df$te_reduced_se,na.rm = TRUE),
-                             empirical_se = sd(results_df$te_reduced,na.rm = TRUE))
+  te_reduced_summary <- list(mean_estimate = mean(results_df$te_reduced, na.rm = TRUE),
+                             mean_se = mean(results_df$te_reduced_se, na.rm = TRUE),
+                             empirical_se = sd(results_df$te_reduced, na.rm = TRUE))
+  
+  ide_reduced_summary <- list(mean_estimate = mean(results_df$ide_reduced, na.rm = TRUE),
+                              mean_se = mean(results_df$ide_reduced_se, na.rm = TRUE),
+                              empirical_se = sd(results_df$ide_reduced, na.rm = TRUE))
   
   # First stage summary
-  first_stage_summary <- list(mean_estimate = mean(results_df$first_stage_est,na.rm = TRUE),
-                              mean_bias = mean(results_df$first_stage_bias,na.rm = TRUE),
-                              mean_se = mean(results_df$first_stage_se,na.rm = TRUE),
-                              empirical_se = sd(results_df$first_stage_est,na.rm = TRUE),
-                              coverage = mean(results_df$first_stage_covers,na.rm = TRUE),
-                              rmse = sqrt(mean(results_df$first_stage_bias^2,na.rm = TRUE)))
+  first_stage_summary <- list(mean_estimate = mean(results_df$first_stage_est, na.rm = TRUE),
+                              mean_bias = mean(results_df$first_stage_bias, na.rm = TRUE),
+                              mean_se = mean(results_df$first_stage_se, na.rm = TRUE),
+                              empirical_se = sd(results_df$first_stage_est, na.rm = TRUE),
+                              coverage = mean(results_df$first_stage_covers, na.rm = TRUE),
+                              rmse = sqrt(mean(results_df$first_stage_bias^2, na.rm = TRUE)))
   
   # Naive estimator summaries
-  naive_nie_summary <- list(mean_estimate = mean(results_df$naive_nie_adl,na.rm = TRUE),
-                            mean_bias = mean(results_df$naive_nie_bias,na.rm = TRUE),
-                            mean_se = mean(results_df$naive_nie_se_adl,na.rm = TRUE),
-                            empirical_se = sd(results_df$naive_nie_adl,na.rm = TRUE),
-                            coverage = mean(results_df$naive_nie_covers,na.rm = TRUE),
-                            rmse = sqrt(mean(results_df$naive_nie_bias^2,na.rm = TRUE)),
-                            convergence_rate = sum(results_df$naive_nie_converged,na.rm = TRUE) / nrow(results_df))
+  naive_nie_summary <- list(mean_estimate = mean(results_df$naive_nie_adl, na.rm = TRUE),
+                            mean_bias = mean(results_df$naive_nie_bias, na.rm = TRUE),
+                            mean_se = mean(results_df$naive_nie_se_adl, na.rm = TRUE),
+                            empirical_se = sd(results_df$naive_nie_adl, na.rm = TRUE),
+                            coverage = mean(results_df$naive_nie_covers, na.rm = TRUE),
+                            rmse = sqrt(mean(results_df$naive_nie_bias^2, na.rm = TRUE)),
+                            convergence_rate = sum(results_df$naive_nie_converged, na.rm = TRUE) / nrow(results_df))
   
-  naive_nde_summary <- list(mean_estimate = mean(results_df$naive_nde_adl,na.rm = TRUE),
-                            mean_bias = mean(results_df$naive_nde_bias,na.rm = TRUE),
-                            mean_se = mean(results_df$naive_nde_se_adl,na.rm = TRUE),
-                            empirical_se = sd(results_df$naive_nde_adl,na.rm = TRUE),
-                            coverage = mean(results_df$naive_nde_covers,na.rm = TRUE),
-                            rmse = sqrt(mean(results_df$naive_nde_bias^2,na.rm = TRUE)),
-                            convergence_rate = sum(results_df$naive_nde_converged,na.rm = TRUE) / nrow(results_df))
+  naive_nde_summary <- list(mean_estimate = mean(results_df$naive_nde_adl, na.rm = TRUE),
+                            mean_bias = mean(results_df$naive_nde_bias, na.rm = TRUE),
+                            mean_se = mean(results_df$naive_nde_se_adl, na.rm = TRUE),
+                            empirical_se = sd(results_df$naive_nde_adl, na.rm = TRUE),
+                            coverage = mean(results_df$naive_nde_covers, na.rm = TRUE),
+                            rmse = sqrt(mean(results_df$naive_nde_bias^2, na.rm = TRUE)),
+                            convergence_rate = sum(results_df$naive_nde_converged, na.rm = TRUE) / nrow(results_df))
   
   # IV diagnostics
   iv_diagnostics <- list(iv_strength_setting = results_df$iv_strength[1],
-                         mean_prop_IV1 = mean(results_df$prop_IV,na.rm = TRUE),
-                         mean_prop_exposure = mean(results_df$prop_insured,na.rm = TRUE),
-                         mean_prop_mediator = mean(results_df$prop_rehabIRF,na.rm = TRUE),
-                         mean_true_iv_ame = mean(results_df$true_iv_ame_on_mediator,na.rm = TRUE))
+                         mean_prop_IV1 = mean(results_df$prop_IV, na.rm = TRUE),
+                         mean_prop_exposure = mean(results_df$prop_insured, na.rm = TRUE),
+                         mean_prop_mediator = mean(results_df$prop_rehabIRF, na.rm = TRUE),
+                         mean_true_iv_ame = mean(results_df$true_iv_ame_on_mediator, na.rm = TRUE))
   
   # True values
-  true_values <- list(true_iie = mean(results_df$true_iie_adl,na.rm = TRUE),
-                      true_ide = mean(results_df$true_ide_adl,na.rm = TRUE),
-                      true_te = mean(results_df$true_te_adl,na.rm = TRUE),
-                      true_first_stage = mean(results_df$true_first_stage,na.rm = TRUE),
-                      prop_mediated = mean(results_df$true_iie_adl,na.rm = TRUE) / 
-                        mean(results_df$true_te_adl,na.rm = TRUE))
+  true_values <- list(true_iie = mean(results_df$true_iie_adl, na.rm = TRUE),
+                      true_ide = mean(results_df$true_ide_adl, na.rm = TRUE),
+                      true_te = mean(results_df$true_te_adl, na.rm = TRUE),
+                      true_first_stage = mean(results_df$true_first_stage, na.rm = TRUE),
+                      prop_mediated = mean(results_df$true_iie_adl, na.rm = TRUE) / 
+                        mean(results_df$true_te_adl, na.rm = TRUE))
   
-  list(IIE = iie_summary,
+  list(IIE = iie_summary, 
        IDE = ide_summary,
-       theta_11 = theta_11_summary,
+       IDE_alt = ide_alt_summary,
+       theta_11 = theta_11_summary, 
        theta_10 = theta_10_summary,
        theta_00 = theta_00_summary,
        IIE_reduced = iie_reduced_summary,
        TE_reduced = te_reduced_summary,
+       IDE_reduced = ide_reduced_summary,
        First_Stage = first_stage_summary,
-       Naive_NIE = naive_nie_summary,
+       Naive_NIE = naive_nie_summary, 
        Naive_NDE = naive_nde_summary,
-       IV_diagnostics = iv_diagnostics,
+       IV_diagnostics = iv_diagnostics, 
        true_values = true_values,
-       n_simulations = nrow(results_df),
+       n_simulations = nrow(results_df), 
        n = results_df$n[1])
 }
 
@@ -1635,7 +1702,7 @@ print_simulation_summary_iv_mediation <- function(summary_stats) {
   cat("                      IV-MEDIATION SIMULATION RESULTS\n")
   cat("================================================================================\n")
   cat(sprintf("N simulations: %d | Sample size: %d | IV strength: %.2f\n",
-              summary_stats$n_simulations,summary_stats$n,
+              summary_stats$n_simulations, summary_stats$n,
               summary_stats$IV_diagnostics$iv_strength_setting))
   cat(sprintf("P(IV=1): %.3f | P(Exposure=1): %.3f | P(Mediator=1): %.3f\n",
               summary_stats$IV_diagnostics$mean_prop_IV1,
@@ -1647,11 +1714,11 @@ print_simulation_summary_iv_mediation <- function(summary_stats) {
   cat("\n--------------------------------------------------------------------------------\n")
   cat("TRUE CAUSAL EFFECTS\n")
   cat("--------------------------------------------------------------------------------\n")
-  cat(sprintf("True IIE (NIE):      %.4f\n",summary_stats$true_values$true_iie))
-  cat(sprintf("True IDE (NDE):      %.4f\n",summary_stats$true_values$true_ide))
-  cat(sprintf("True TE:             %.4f\n",summary_stats$true_values$true_te))
-  cat(sprintf("True First Stage:    %.4f\n",summary_stats$true_values$true_first_stage))
-  cat(sprintf("Proportion Mediated: %.3f\n",summary_stats$true_values$prop_mediated))
+  cat(sprintf("True IIE (NIE):      %.4f\n", summary_stats$true_values$true_iie))
+  cat(sprintf("True IDE (NDE):      %.4f\n", summary_stats$true_values$true_ide))
+  cat(sprintf("True TE:             %.4f\n", summary_stats$true_values$true_te))
+  cat(sprintf("True First Stage:    %.4f\n", summary_stats$true_values$true_first_stage))
+  cat(sprintf("Proportion Mediated: %.3f\n", summary_stats$true_values$prop_mediated))
   
   cat("\n--------------------------------------------------------------------------------\n")
   cat("THETA PARAMETER ESTIMATES\n")
@@ -1687,6 +1754,10 @@ print_simulation_summary_iv_mediation <- function(summary_stats) {
               summary_stats$TE_reduced$mean_estimate,
               summary_stats$TE_reduced$mean_se,
               summary_stats$TE_reduced$empirical_se))
+  cat(sprintf("IDE_reduced (θ10-θ00)  NA        %.4f    NA        %.4f    %.4f    NA\n",
+              summary_stats$IDE_reduced$mean_estimate,
+              summary_stats$IDE_reduced$mean_se,
+              summary_stats$IDE_reduced$empirical_se))
   cat(sprintf("First Stage            %.4f    %.4f    %.4f    %.4f    %.4f    %.3f\n",
               summary_stats$true_values$true_first_stage,
               summary_stats$First_Stage$mean_estimate,
@@ -1698,6 +1769,10 @@ print_simulation_summary_iv_mediation <- function(summary_stats) {
   cat("\n--------------------------------------------------------------------------------\n")
   cat("IV-BASED ESTIMATORS (accounting for unmeasured confounding)\n")
   cat("--------------------------------------------------------------------------------\n")
+  cat("IIE  = (θ11-θ10) / FS\n")
+  cat("IDE  = (θ11-θ00) - IIE  [TE_reduced - IIE]\n")
+  cat("IDE* = (θ10-θ00) / FS   [alternative estimator]\n")
+  cat("\n")
   cat("Estimand    True      Est       Bias      Model_SE  Emp_SE    Coverage\n")
   cat("----------- --------  --------  --------  --------  --------  --------\n")
   cat(sprintf("IIE         %.4f    %.4f    %.4f    %.4f    %.4f    %.3f\n",
@@ -1714,6 +1789,13 @@ print_simulation_summary_iv_mediation <- function(summary_stats) {
               summary_stats$IDE$mean_se,
               summary_stats$IDE$empirical_se,
               summary_stats$IDE$coverage))
+  cat(sprintf("IDE*        %.4f    %.4f    %.4f    %.4f    %.4f    %.3f\n",
+              summary_stats$true_values$true_ide,
+              summary_stats$IDE_alt$mean_estimate,
+              summary_stats$IDE_alt$mean_bias,
+              summary_stats$IDE_alt$mean_se,
+              summary_stats$IDE_alt$empirical_se,
+              summary_stats$IDE_alt$coverage))
   
   cat("\n--------------------------------------------------------------------------------\n")
   cat("NAIVE ESTIMATORS (ignoring unmeasured confounding)\n")
@@ -1739,7 +1821,7 @@ print_simulation_summary_iv_mediation <- function(summary_stats) {
 
 
 # Run simulation
-N_SIMS <- 1000
+N_SIMS <- 100
 
 sim_study <- run_simulation_study_iv_mediation(n_sims = N_SIMS,
                                                n = 6000,
@@ -1754,7 +1836,7 @@ print_simulation_summary_iv_mediation(sim_summary)
 
 
 # number of sims
-N_SIMS <- 100
+N_SIMS <- 10
 
 # N=5000
 sim_study <- run_simulation_study_iv_mediation(n_sims = N_SIMS,
