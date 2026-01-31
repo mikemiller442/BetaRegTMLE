@@ -211,12 +211,18 @@ robustcompATE <- function(outcome_mod,ps_mod,covariates,
   ci_lower <- ate_est_scaled - qnorm(0.975) * se_ate
   ci_upper <- ate_est_scaled + qnorm(0.975) * se_ate
   
+  ### calculate p-value under null hypothesis H0: ATE = 0
+  z_stat <- ate_est_scaled / se_ate
+  p_value <- 2 * pnorm(-abs(z_stat))
+  
   ### return results
   return(list(ATE = ate_est_scaled,
               ITE = ate_star_scaled,
               IF = EIF,
               SE = se_ate,
-              CI = c(lower = ci_lower,upper = ci_upper)))
+              CI = c(lower = ci_lower,upper = ci_upper),
+              z_statistic = z_stat,
+              p_value = p_value))
 }
 
 

@@ -211,12 +211,18 @@ robustcompATE <- function(outcome_mod,ps_mod,covariates,
   ci_lower <- ate_est_scaled - qnorm(0.975) * se_ate
   ci_upper <- ate_est_scaled + qnorm(0.975) * se_ate
   
+  ### calculate p-value under null hypothesis H0: ATE = 0
+  z_stat <- ate_est_scaled / se_ate
+  p_value <- 2 * pnorm(-abs(z_stat))
+  
   ### return results
   return(list(ATE = ate_est_scaled,
               ITE = ate_star_scaled,
               IF = EIF,
               SE = se_ate,
-              CI = c(lower = ci_lower,upper = ci_upper)))
+              CI = c(lower = ci_lower,upper = ci_upper),
+              z_statistic = z_stat,
+              p_value = p_value))
 }
 
 
@@ -287,11 +293,17 @@ robustcompATT <- function(outcome_mod,ps_mod,covariates,
   ci_lower <- psi_att_scaled - qnorm(0.975) * se
   ci_upper <- psi_att_scaled + qnorm(0.975) * se
   
+  ### calculate p-value under null hypothesis H0: ATT = 0
+  z_stat <- psi_att_scaled / se
+  p_value <- 2 * pnorm(-abs(z_stat))
+  
   ### return results
   return(list(ATT = psi_att_scaled,
               IF = EIF_scaled,
               SE = se,
-              CI = c(lower = ci_lower,upper = ci_upper)))
+              CI = c(lower = ci_lower,upper = ci_upper),
+              z_statistic = z_stat,
+              p_value = p_value))
 }
 
 
@@ -380,12 +392,18 @@ robustcompATE_MAR <- function(outcome_mod,ps_mod,missing_mod,
   ci_lower <- ate_mean - qnorm(0.975) * se_ate
   ci_upper <- ate_mean + qnorm(0.975) * se_ate
   
+  ### calculate p-value under null hypothesis H0: ATE = 0
+  z_stat <- ate_mean / se_ate
+  p_value <- 2 * pnorm(-abs(z_stat))
+  
   ### return results
   return(list(ATE = ate_mean,
               ITE = ate_star_scaled,
               IF = EIF,
               SE = se_ate,
-              CI = c(lower = ci_lower,upper = ci_upper)))
+              CI = c(lower = ci_lower,upper = ci_upper),
+              z_statistic = z_stat,
+              p_value = p_value))
 }
 
 
@@ -477,11 +495,17 @@ robustcompATT_MAR <- function(outcome_mod,ps_mod,missing_mod,
   ci_lower <- psi_att_scaled - qnorm(0.975) * se_att_scaled
   ci_upper <- psi_att_scaled + qnorm(0.975) * se_att_scaled
   
+  ### calculate p-value under null hypothesis H0: ATT = 0
+  z_stat <- psi_att_scaled / se_att_scaled
+  p_value <- 2 * pnorm(-abs(z_stat))
+  
   # return results
   return(list(ATT = psi_att_scaled,
               IF = EIF_scaled,
               SE = se_att_scaled,
-              CI = c(lower = ci_lower,upper = ci_upper)))
+              CI = c(lower = ci_lower,upper = ci_upper),
+              z_statistic = z_stat,
+              p_value = p_value))
 }
 
 
@@ -667,21 +691,21 @@ run_single_simulation <- function(n = 1000,
   data$OUT3_ADL_IADL_01 <- (data$OUT3_ADL_IADL_01 * (N_adl - 1) + 0.5) / N_adl
   
   ### estimate propensity score model (hardcoded formula)
-  ps_model <- glm(rehabIRF ~ age + post_discharge_disability + stroke_severity + comorbidity,
+  ps_model <- glm(rehabIRF ~ age+post_discharge_disability+stroke_severity+comorbidity,
                   data = data,family = binomial())
   
   if (missing_outcome) {
     # missing data model (hardcoded formula)
-    missing_model_adl <- glm(observed_adl ~ rehabIRF + age + post_discharge_disability + 
-                               stroke_severity + comorbidity,
+    missing_model_adl <- glm(observed_adl ~ rehabIRF+age+post_discharge_disability
+                             +stroke_severity+comorbidity,
                              data = data,family = binomial())
     
     ### estimate outcome models on observed data only
     data_obs_adl <- data[observed_adl == 1,]
     
     # outcome model (hardcoded formula with interaction term to match DGM)
-    adl_mod <- betareg(OUT3_ADL_IADL_01 ~ age + rehabIRF * post_discharge_disability + 
-                         stroke_severity + comorbidity,
+    adl_mod <- betareg(OUT3_ADL_IADL_01 ~ age+rehabIRF * post_discharge_disability
+                       +stroke_severity+comorbidity,
                        data = data_obs_adl)
     
     ### apply TMLE for ATE with missing outcomes
@@ -712,8 +736,8 @@ run_single_simulation <- function(n = 1000,
     
   } else {
     # outcome model (hardcoded formula with interaction term to match DGM)
-    adl_mod <- betareg(OUT3_ADL_IADL_01 ~ age + rehabIRF * post_discharge_disability + 
-                         stroke_severity + comorbidity,
+    adl_mod <- betareg(OUT3_ADL_IADL_01 ~ age+rehabIRF * post_discharge_disability
+                       +stroke_severity+comorbidity,
                        data = data)
     
     ### apply TMLE for ATE
@@ -748,11 +772,15 @@ run_single_simulation <- function(n = 1000,
              ate_se_adl = results_ate$SE,
              ate_ci_lower_adl = results_ate$CI["lower"],
              ate_ci_upper_adl = results_ate$CI["upper"],
+             ate_z_stat_adl = results_ate$z_statistic,
+             ate_p_value_adl = results_ate$p_value,
              # ATT results
              att_adl = results_att$ATT,
              att_se_adl = results_att$SE,
              att_ci_lower_adl = results_att$CI["lower"],
              att_ci_upper_adl = results_att$CI["upper"],
+             att_z_stat_adl = results_att$z_statistic,
+             att_p_value_adl = results_att$p_value,
              # true values
              true_ate_adl = sim_data$true_ate_adl,
              true_att_adl = sim_data$true_att_adl)
@@ -803,11 +831,13 @@ run_simulation_study <- function(n_sims = 500,
   results$ate_bias_adl <- results$ate_adl - results$true_ate_adl
   results$ate_coverage_adl <- (results$ate_ci_lower_adl <= results$true_ate_adl) & 
     (results$ate_ci_upper_adl >= results$true_ate_adl)
+  results$ate_significant_adl <- results$ate_p_value_adl < 0.05
   
   # calculate simulation performance metrics for ATT
   results$att_bias_adl <- results$att_adl - results$true_att_adl
   results$att_coverage_adl <- (results$att_ci_lower_adl <= results$true_att_adl) & 
     (results$att_ci_upper_adl >= results$true_att_adl)
+  results$att_significant_adl <- results$att_p_value_adl < 0.05
   
   return(results)
 }
@@ -822,7 +852,9 @@ summarize_simulation <- function(results) {
                  mean_bias = mean(results$ate_bias_adl),
                  mean_se = mean(results$ate_se_adl),
                  empirical_se = sd(results$ate_adl),
-                 coverage = mean(results$ate_coverage_adl))
+                 coverage = mean(results$ate_coverage_adl),
+                 mean_p_value = mean(results$ate_p_value_adl),
+                 power = mean(results$ate_significant_adl))
   
   # ATT summary statistics
   att_stats <- c(mean_estimate = mean(results$att_adl),
@@ -830,7 +862,9 @@ summarize_simulation <- function(results) {
                  mean_bias = mean(results$att_bias_adl),
                  mean_se = mean(results$att_se_adl),
                  empirical_se = sd(results$att_adl),
-                 coverage = mean(results$att_coverage_adl))
+                 coverage = mean(results$att_coverage_adl),
+                 mean_p_value = mean(results$att_p_value_adl),
+                 power = mean(results$att_significant_adl))
   
   # create summary table
   summary_table <- data.frame(Estimand = c("ATE","ATT"),
@@ -839,7 +873,9 @@ summarize_simulation <- function(results) {
                               Mean_Bias = round(c(ate_stats["mean_bias"],att_stats["mean_bias"]),4),
                               Mean_SE = round(c(ate_stats["mean_se"],att_stats["mean_se"]),4),
                               Empirical_SE = round(c(ate_stats["empirical_se"],att_stats["empirical_se"]),4),
-                              Coverage = round(c(ate_stats["coverage"],att_stats["coverage"]),3))
+                              Coverage = round(c(ate_stats["coverage"],att_stats["coverage"]),3),
+                              Mean_P_Value = round(c(ate_stats["mean_p_value"],att_stats["mean_p_value"]),4),
+                              Power = round(c(ate_stats["power"],att_stats["power"]),3))
   
   cat("\n=== Simulation Summary ===\n")
   cat(sprintf("N simulations: %d | Sample size: %d | Missing outcome: %s | Cross-fitting: %s\n\n",
@@ -849,14 +885,25 @@ summarize_simulation <- function(results) {
               results$crossFit[1]))
   print(summary_table,row.names = FALSE)
   
+  cat("\n=== Additional P-Value Diagnostics ===\n")
+  cat(sprintf("ATE - Median p-value: %.4f | Min: %.4f | Max: %.4f\n",
+              median(results$ate_p_value_adl),
+              min(results$ate_p_value_adl),
+              max(results$ate_p_value_adl)))
+  cat(sprintf("ATT - Median p-value: %.4f | Min: %.4f | Max: %.4f\n",
+              median(results$att_p_value_adl),
+              min(results$att_p_value_adl),
+              max(results$att_p_value_adl)))
+  
   return(summary_table)
 }
 
 
-
+#########
+### high sample size to assess accuracy
+#########
 ### number of sims
-N_SIMS <- 1500
-
+N_SIMS <- 500
 
 # without cross-fitting
 sim_results <- run_simulation_study(n_sims = N_SIMS,
@@ -875,7 +922,7 @@ summary_results <- summarize_simulation(sim_results)
 
 
 ### number of sims
-N_SIMS <- 100
+N_SIMS <- 50
 
 # with cross-fitting
 sim_results_cf <- run_simulation_study(n_sims = N_SIMS,
@@ -889,33 +936,42 @@ sim_results_cf <- summarize_simulation(sim_results_cf)
 
 
 
-# ### completely observed outcomes
-# # N = 500
-# sim_results <- run_simulation_study(n_sims = N_SIMS,n = 625,
-#                                     trunc_level = 0.005,
-#                                     missing_outcome = FALSE,
-#                                     prob_observed_baseline = 0.8,
-#                                     use_fixed_covariates = TRUE)
-# summary_results <- summarize_simulation(sim_results)
-# 
-# # N = 1500
-# sim_results <- run_simulation_study(n_sims = N_SIMS,n = 1875,
-#                                     trunc_level = 0.005,
-#                                     missing_outcome = FALSE,
-#                                     prob_observed_baseline = 0.8,
-#                                     use_fixed_covariates = TRUE)
-# summary_results <- summarize_simulation(sim_results)
-# 
-# 
-# 
-# ### missing outcomes
-# # N = 500
-# sim_results <- run_simulation_study(n_sims = N_SIMS,n = 625,
-#                                     trunc_level = 0.005,
-#                                     missing_outcome = TRUE,
-#                                     prob_observed_baseline = 0.8,
-#                                     use_fixed_covariates = TRUE)
-# summary_results <- summarize_simulation(sim_results)
+
+
+#########
+### low sample size to assess power
+#########
+### number of sims
+N_SIMS <- 500
+
+# without cross-fitting
+sim_results <- run_simulation_study(n_sims = N_SIMS,
+                                    n = 75,
+                                    trunc_level = 0.005,
+                                    missing_outcome = FALSE,
+                                    crossFit = FALSE)
+summary_results <- summarize_simulation(sim_results)
+
+sim_results <- run_simulation_study(n_sims = N_SIMS,
+                                    n = 75,
+                                    trunc_level = 0.005,
+                                    missing_outcome = TRUE,
+                                    crossFit = FALSE)
+summary_results <- summarize_simulation(sim_results)
+
+
+
+### number of sims
+N_SIMS <- 50
+
+# with cross-fitting
+sim_results_cf <- run_simulation_study(n_sims = N_SIMS,
+                                       n = 75,
+                                       trunc_level = 0.005,
+                                       missing_outcome = FALSE,
+                                       crossFit = TRUE,
+                                       n_folds = 5)
+sim_results_cf <- summarize_simulation(sim_results_cf)
 
 
 
